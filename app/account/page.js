@@ -101,13 +101,17 @@ export default function Account() {
             {orders.map((order) => (
               <div className="row" key={order.id}>
                 <div className="row-main">
-                  <strong>{order.product_name}</strong>
+                  <strong>{order.product_name}{order.quantity > 1 ? " × " + order.quantity : ""}</strong>
                   <span>{shortDate(order.created_at)} · {usd(order.total_cents)}{order.credit_used_cents > 0 ? " + " + usd(order.credit_used_cents) + " credit" : ""}{order.discount_code ? " · code " + order.discount_code : ""}</span>
                   <span>Order {orderLabel(order)}</span>
                   <span><span className={"badge " + order.status}>{STATUS_LABELS[order.status]}</span></span>
                 </div>
+                {order.status !== "awaiting_payment" && order.status !== "cancelled" && (
+                  <div className="row-actions"><Link className="small-button" href={"/order/" + order.id}>View order</Link></div>
+                )}
                 {order.status === "awaiting_payment" && (
                   <div className="row-actions">
+                    <Link className="small-button ghost" href={"/order/" + order.id}>View</Link>
                     {order.invoice_url && <a className="small-button" href={order.invoice_url}>Pay now</a>}
                     <button className={confirmCancel === order.id ? "small-button danger" : "small-button ghost"} type="button" onClick={() => cancel(order)}>
                       {confirmCancel === order.id ? "Confirm cancel" : "Cancel"}

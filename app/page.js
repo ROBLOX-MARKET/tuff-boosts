@@ -12,9 +12,14 @@ function ProductCard({ product }) {
     <article className="product">
       {product.image_url && <img className="product-image" src={product.image_url} alt="" loading="lazy" />}
       <h4>{product.name}</h4>
-      <div className="price">{usd(product.price_cents)}</div>
+      <div className="price">{usd(product.price_cents)}{product.stock_tracked ? <span className="per"> each</span> : null}</div>
+      {product.stock_tracked && (
+        <span className={product.stock > 0 ? "stock in" : "stock out"}>{product.stock > 0 ? product.stock + " in stock · instant delivery" : "Out of stock"}</span>
+      )}
       {product.description && <p>{product.description}</p>}
-      <Link className="pill" href={"/checkout/" + product.id}>Buy now</Link>
+      {product.stock_tracked && !(product.stock > 0)
+        ? <span className="pill off">Out of stock</span>
+        : <Link className="pill" href={"/checkout/" + product.id}>Buy now</Link>}
     </article>
   );
 }
@@ -58,15 +63,14 @@ export default function Home() {
   const sold = useCountUp(Math.max(0, Number(site.boosts_sold) || 0));
 
   useEffect(() => {
-    supabase
-      .from("products")
-      .select("*")
-      .eq("active", true)
-      .order("price_cents", { ascending: true })
-      .then(({ data }) => {
-        setProducts(data || []);
-        setLoaded(true);
-      });
+    Promise.all([
+      supabase.from("products").select("*").eq("active", true).order("price_cents", { ascending: true }),
+      supabase.rpc("stock_counts")
+    ]).then(([{ data }, { data: stock }]) => {
+      const counts = Object.fromEntries((stock || []).map((row) => [row.product_id, Number(row.available)]));
+      setProducts((data || []).map((product) => ({ ...product, stock: counts[product.id] ?? 0 })));
+      setLoaded(true);
+    });
   }, []);
 
   const comingSoon = (id) => Boolean((site.coming_soon || {})[id]);

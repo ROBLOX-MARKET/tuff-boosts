@@ -80,6 +80,17 @@ section { padding-block: 54px 0; }
 .product:hover { border-color: var(--sky); }
 .product h4 { font-size: 24px; overflow-wrap: anywhere; }
 .product-image { display: block; width: calc(100% + 44px); max-width: none; aspect-ratio: 4 / 3; margin: -22px -22px 6px; object-fit: cover; border-radius: 18px 18px 0 0; background: var(--panel-2); }
+.price .per { color: var(--muted); font: 600 16px var(--font-body), Arial, sans-serif; }
+.stock { align-self: flex-start; padding: 3px 10px; border-radius: 999px; font-size: 13px; font-weight: 700; border: 1px solid; }
+.stock.in { color: var(--good); border-color: var(--good); }
+.stock.out { color: #FF7D98; border-color: #FF7D98; }
+.qty { display: flex; align-items: center; gap: 8px; }
+.qty input { width: 90px; text-align: center; }
+.qty button { min-width: 48px; min-height: 48px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel-2); color: var(--ink); font: 700 20px var(--font-body), Arial, sans-serif; cursor: pointer; }
+.codes { display: grid; gap: 8px; margin-top: 14px; }
+.code-row { display: flex; align-items: center; gap: 10px; padding: 10px 12px; background: var(--panel-2); border: 1px solid var(--line); border-radius: 12px; }
+.code-row code { flex: 1; min-width: 0; overflow-wrap: anywhere; font-size: 15px; color: var(--ink); }
+.code-row .num { color: var(--muted); font-size: 13px; font-weight: 700; width: 28px; flex: none; }
 .thumb { width: 56px; height: 42px; flex: none; object-fit: cover; border-radius: 8px; background: var(--panel); }
 .price { color: var(--sky); font: 800 30px var(--font-display), Arial, sans-serif; font-variant-numeric: tabular-nums; }
 .product p { margin: 0; color: var(--muted); overflow-wrap: anywhere; }

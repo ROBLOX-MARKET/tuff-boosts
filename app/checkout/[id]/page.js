@@ -13,6 +13,8 @@ export default function Checkout({ params }) {
   const { session, authReady } = useApp();
   const [product, setProduct] = useState(null);
   const [missing, setMissing] = useState(false);
+  const [stock, setStock] = useState(null);
+  const [qty, setQty] = useState(1);
   const [serverLink, setServerLink] = useState("");
   const [codeInput, setCodeInput] = useState("");
   const [code, setCode] = useState("");
@@ -24,27 +26,32 @@ export default function Checkout({ params }) {
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
-    supabase
-      .from("products")
-      .select("*")
-      .eq("id", productId)
-      .eq("active", true)
-      .maybeSingle()
-      .then(({ data }) => {
-        if (data) setProduct(data);
-        else setMissing(true);
-      });
+    Promise.all([
+      supabase.from("products").select("*").eq("id", productId).eq("active", true).maybeSingle(),
+      supabase.rpc("stock_counts")
+    ]).then(([{ data }, { data: counts }]) => {
+      if (!data) {
+        setMissing(true);
+        return;
+      }
+      setProduct(data);
+      if (data.stock_tracked) {
+        const row = (counts || []).find((item) => item.product_id === data.id);
+        setStock(row ? Number(row.available) : 0);
+      }
+    });
   }, [productId]);
 
   useEffect(() => {
     if (authReady && !session) router.replace("/login?next=/checkout/" + productId);
   }, [authReady, session, router, productId]);
 
-  const loadQuote = useCallback(async (nextCode, nextUseCredit) => {
-    const { data, error: quoteError } = await supabase.rpc("quote_order", {
+  const loadQuote = useCallback(async (nextCode, nextUseCredit, nextQty) => {
+    const { data, error: quoteError } = await supabase.rpc("quote_order_qty", {
       p_product: productId,
       p_code: nextCode,
-      p_use_credit: nextUseCredit
+      p_use_credit: nextUseCredit,
+      p_qty: nextQty
     });
     if (quoteError) {
       setError("Prices couldn't load. Refresh the page to try again.");
@@ -55,25 +62,32 @@ export default function Checkout({ params }) {
 
   useEffect(() => {
     if (!session) return;
-    loadQuote(code, useCredit).then((data) => {
+    loadQuote(code, useCredit, qty).then((data) => {
       if (!data) return;
-      if (data.error && code) {
+      if (data.error && code && data.stock === undefined) {
         // The applied code stopped working: drop it and price without it.
         setCode("");
         setCodeError(data.error);
         return;
       }
-      if (data.error) setError(data.error);
-      else setQuote(data);
+      if (data.error) {
+        setError(data.error);
+        if (typeof data.stock === "number") setStock(data.stock);
+        setQuote(null);
+      } else {
+        setError("");
+        setQuote(data);
+        if (typeof data.stock === "number") setStock(data.stock);
+      }
     });
-  }, [session, code, useCredit, loadQuote]);
+  }, [session, code, useCredit, qty, loadQuote]);
 
   async function applyCode(event) {
     event.preventDefault();
     setCodeError("");
     const entered = codeInput.trim();
     if (!entered) return;
-    const data = await loadQuote(entered, useCredit);
+    const data = await loadQuote(entered, useCredit, qty);
     if (!data) return;
     if (data.error) {
       setCodeError(data.error);
@@ -89,10 +103,16 @@ export default function Checkout({ params }) {
     setCodeError("");
   }
 
+  const maxQty = Math.max(1, Math.min(100, stock ?? 1));
+  function changeQty(next) {
+    const value = Math.max(1, Math.min(maxQty, Math.floor(Number(next) || 1)));
+    setQty(value);
+  }
+
   async function pay(event) {
     event.preventDefault();
     setError("");
-    if (!serverLink.trim()) {
+    if (!product.stock_tracked && !serverLink.trim()) {
       setError("Enter your server link.");
       return;
     }
@@ -101,7 +121,7 @@ export default function Checkout({ params }) {
     const response = await fetch("/api/checkout", {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: "Bearer " + (current.session?.access_token || "") },
-      body: JSON.stringify({ productId, serverLink, code, useCredit, currency })
+      body: JSON.stringify({ productId, serverLink, code, useCredit, currency, quantity: qty })
     });
     const data = await response.json().catch(() => ({}));
     if (!response.ok) {
@@ -113,7 +133,7 @@ export default function Checkout({ params }) {
       window.location.href = data.url;
       return;
     }
-    router.push("/account?paid=" + data.orderId);
+    router.push("/order/" + data.orderId);
   }
 
   if (missing) {
@@ -130,7 +150,9 @@ export default function Checkout({ params }) {
     return <main className="wrap narrow page"><p className="page-lead">Loading…</p></main>;
   }
 
-  const total = quote ? quote.total : product.price_cents;
+  const tracked = product.stock_tracked;
+  const outOfStock = tracked && stock === 0;
+  const total = quote ? quote.total : product.price_cents * qty;
 
   return (
     <main className="wrap narrow page">
@@ -138,10 +160,22 @@ export default function Checkout({ params }) {
       <p className="page-lead">{product.name}</p>
 
       <form className="card stack" onSubmit={pay}>
-        <label>Server link
-          <input value={serverLink} onChange={(e) => setServerLink(e.target.value)} placeholder="https://discord.gg/yourserver" maxLength={200} required />
-          <span className="hint">Double-check this. We can&apos;t move boosts to another server.</span>
-        </label>
+        {tracked ? (
+          <div className="stack">
+            <label htmlFor="qty">How many?</label>
+            <div className="qty">
+              <button type="button" aria-label="One less" onClick={() => changeQty(qty - 1)} disabled={qty <= 1}>−</button>
+              <input id="qty" type="number" inputMode="numeric" min={1} max={maxQty} value={qty} onChange={(e) => changeQty(e.target.value)} />
+              <button type="button" aria-label="One more" onClick={() => changeQty(qty + 1)} disabled={qty >= maxQty}>+</button>
+            </div>
+            <span className="hint">{outOfStock ? "Out of stock right now." : stock + " in stock. Your links appear on your order page as soon as payment is confirmed."}</span>
+          </div>
+        ) : (
+          <label>Server link
+            <input value={serverLink} onChange={(e) => setServerLink(e.target.value)} placeholder="https://discord.gg/yourserver" maxLength={200} required />
+            <span className="hint">Double-check this. We can&apos;t move boosts to another server.</span>
+          </label>
+        )}
 
         <div className="stack">
           <label htmlFor="code">Discount code</label>
@@ -175,15 +209,15 @@ export default function Checkout({ params }) {
         )}
 
         <dl className="summary">
-          <div><dt>Price</dt><dd>{usd(product.price_cents)}</dd></div>
+          <div><dt>{tracked ? qty + " × " + usd(product.price_cents) : "Price"}</dt><dd>{usd(product.price_cents * qty)}</dd></div>
           {quote?.discount > 0 && <div className="minus"><dt>Discount ({quote.code})</dt><dd>−{usd(quote.discount)}</dd></div>}
           {quote?.credit > 0 && <div className="minus"><dt>Credit</dt><dd>−{usd(quote.credit)}</dd></div>}
           <div className="total"><dt>Total</dt><dd>{usd(total)}</dd></div>
         </dl>
 
         {error && <p className="error" role="alert">{error}</p>}
-        <button className="pill" type="submit" disabled={busy || !quote}>
-          {busy ? "Placing order…" : total > 0 ? "Pay " + usd(total) : "Place order with credit"}
+        <button className="pill" type="submit" disabled={busy || !quote || outOfStock}>
+          {busy ? "Placing order…" : outOfStock ? "Out of stock" : total > 0 ? "Pay " + usd(total) : "Place order with credit"}
         </button>
         <p className="hint">
           {total > 0

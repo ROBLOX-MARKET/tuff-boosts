@@ -83,6 +83,12 @@ function Orders() {
       load();
       return;
     }
+    if (action === "deliver") {
+      const { data: sent, error: deliverError } = await supabase.rpc("admin_deliver_missing_codes", { p_order: order.id });
+      setStatus(deliverError ? "That didn't work: " + deliverError.message : sent > 0 ? "Sent " + sent + " more link(s). They're on the customer's order page now." : "No new links in stock yet. Add more first.");
+      load();
+      return;
+    }
     const { error } = action === "refund"
       ? await supabase.rpc("admin_refund_to_credit", { p_order: order.id })
       : await supabase.rpc("admin_set_order_status", { p_order: order.id, p_status: action });
@@ -138,10 +144,10 @@ function Orders() {
           {orders.map((order) => (
             <div className="row" key={order.id}>
               <div className="row-main">
-                <strong>{order.product_name} · {names[order.user_id] || "Customer"}</strong>
+                <strong>{order.product_name}{order.quantity > 1 ? " × " + order.quantity : ""} · {names[order.user_id] || "Customer"}</strong>
                 <span>{shortDate(order.created_at)} · Order {orderLabel(order)}{order.receipt_sent_at ? " · Receipt sent" : ""} · <span className={"badge " + order.status}>{STATUS_LABELS[order.status]}</span></span>
                 <span>Paid {usd(order.total_cents)} in {order.pay_currency.toUpperCase()}{order.credit_used_cents ? " + " + usd(order.credit_used_cents) + " credit" : ""}{order.discount_code ? " · code " + order.discount_code + " (−" + usd(order.discount_cents) + ")" : ""}</span>
-                <span>Server: {order.server_link}</span>
+                {order.server_link && <span>Server: {order.server_link}</span>}
                 {order.payment_note && <span className="error">{order.payment_note}</span>}
               </div>
               <div className="row-actions">
@@ -150,6 +156,7 @@ function Orders() {
                 {(order.status === "paid" || order.status === "completed") && button(order, "receipt", order.receipt_sent_at ? "Resend receipt" : "Send receipt")}
                 {(order.status === "awaiting_payment" || order.status === "cancelled") && button(order, "paid", "Mark paid")}
                 {order.status === "awaiting_payment" && button(order, "cancelled", "Cancel")}
+                {order.status === "paid" && order.payment_note && order.payment_note.includes("codes") && button(order, "deliver", "Send missing links")}
               </div>
             </div>
           ))}
@@ -244,7 +251,7 @@ function Customers() {
 
 /* ---------------- Products ---------------- */
 
-const EMPTY_PRODUCT = { name: "", category: "boosts", price: "", sold: "0", description: "", image_url: "" };
+const EMPTY_PRODUCT = { name: "", category: "boosts", price: "", sold: "0", description: "", image_url: "", stock_tracked: false };
 const IMAGE_TYPES = ["image/png", "image/jpeg", "image/webp", "image/gif"];
 
 async function uploadProductImage(file) {
@@ -266,11 +273,43 @@ function Products() {
   const [imageFile, setImageFile] = useState(null);
   const [fileKey, setFileKey] = useState(0);
   const [busy, setBusy] = useState(false);
+  const [stock, setStock] = useState({});
+  const [addingTo, setAddingTo] = useState(null);
+  const [newCodes, setNewCodes] = useState("");
 
   const load = useCallback(async () => {
-    const { data } = await supabase.from("products").select("*").order("created_at", { ascending: true });
+    const [{ data }, { data: counts }] = await Promise.all([
+      supabase.from("products").select("*").order("created_at", { ascending: true }),
+      supabase.rpc("stock_counts")
+    ]);
     setProducts(data || []);
+    setStock(Object.fromEntries((counts || []).map((row) => [row.product_id, Number(row.available)])));
   }, []);
+
+  async function addCodes(event) {
+    event.preventDefault();
+    const lines = [...new Set(newCodes.split(/\r?\n/).map((line) => line.trim()).filter(Boolean))];
+    if (!lines.length) {
+      setStatus("Paste at least one link, one per line.");
+      return;
+    }
+    const { data: existing } = await supabase.from("product_codes").select("code").eq("product_id", addingTo.id).in("code", lines);
+    const taken = new Set((existing || []).map((row) => row.code));
+    const fresh = lines.filter((line) => !taken.has(line));
+    if (!fresh.length) {
+      setStatus("All of those links were already added.");
+      return;
+    }
+    const { error } = await supabase.from("product_codes").insert(fresh.map((code) => ({ product_id: addingTo.id, code })));
+    if (error) {
+      setStatus("Those links didn't save. Try again.");
+      return;
+    }
+    setStatus("Added " + fresh.length + " link" + (fresh.length === 1 ? "" : "s") + " to " + addingTo.name + (taken.size ? " (" + taken.size + " duplicates skipped)." : "."));
+    setNewCodes("");
+    setAddingTo(null);
+    load();
+  }
 
   useEffect(() => { load(); }, [load]);
 
@@ -300,7 +339,8 @@ function Products() {
       price_cents: price,
       sold: Math.max(0, Math.floor(Number(form.sold) || 0)),
       description: form.description.trim(),
-      image_url: imageUrl
+      image_url: imageUrl,
+      stock_tracked: Boolean(form.stock_tracked)
     };
     const { error } = editing
       ? await supabase.from("products").update(row).eq("id", editing)
@@ -326,7 +366,8 @@ function Products() {
       price: (product.price_cents / 100).toFixed(2),
       sold: String(product.sold),
       description: product.description,
-      image_url: product.image_url || ""
+      image_url: product.image_url || "",
+      stock_tracked: Boolean(product.stock_tracked)
     });
   }
 
@@ -361,6 +402,10 @@ function Products() {
           <label>Number sold<input {...field("sold")} type="number" min="0" step="1" /></label>
         </div>
         <label>Description<textarea {...field("description")} rows={2} maxLength={240} /></label>
+        <label className="check" htmlFor="stock-tracked">
+          <span>Sell from stock (customers pick a quantity and get links automatically when they pay)</span>
+          <input id="stock-tracked" type="checkbox" checked={Boolean(form.stock_tracked)} onChange={(e) => setForm({ ...form, stock_tracked: e.target.checked })} />
+        </label>
         <div className="stack">
           <label>Image (optional)
             <input key={fileKey} type="file" accept="image/png,image/jpeg,image/webp,image/gif" onChange={(e) => setImageFile(e.target.files?.[0] || null)} />
@@ -381,6 +426,19 @@ function Products() {
       </form>
       <div className="card">
         <h2>Your products</h2>
+        {addingTo && (
+          <form className="card stack" onSubmit={addCodes}>
+            <h3>Add links to {addingTo.name}</h3>
+            <label>Links, one per line
+              <textarea value={newCodes} onChange={(e) => setNewCodes(e.target.value)} rows={8} placeholder={"https://discord.gift/...\nhttps://discord.gift/..."} />
+              <span className="hint">{newCodes.split(/\r?\n/).filter((line) => line.trim()).length} link(s) ready to add. Each one is sold once.</span>
+            </label>
+            <div className="row-actions">
+              <button className="small-button" type="submit">Add to stock</button>
+              <button className="small-button ghost" type="button" onClick={() => { setAddingTo(null); setNewCodes(""); }}>Cancel</button>
+            </div>
+          </form>
+        )}
         {products.length ? (
           <div className="list">
             {products.map((product) => (
@@ -389,8 +447,10 @@ function Products() {
                 <div className="row-main" style={{ flex: 1 }}>
                   <strong>{product.name} · {usd(product.price_cents)}</strong>
                   <span>{CATEGORIES.find((c) => c.id === product.category)?.label} · {product.sold} sold{product.active ? "" : " · Hidden"}</span>
+                  {product.stock_tracked && <span className={(stock[product.id] || 0) > 0 ? "stock in" : "stock out"}>{stock[product.id] || 0} in stock</span>}
                 </div>
                 <div className="row-actions">
+                  {product.stock_tracked && <button className="small-button" type="button" onClick={() => { setAddingTo(product); setNewCodes(""); }}>Add links</button>}
                   <button className="small-button ghost" type="button" onClick={() => edit(product)}>Edit</button>
                   <button className="small-button ghost" type="button" onClick={() => toggle(product)}>{product.active ? "Hide" : "Show"}</button>
                   <button className={confirm === product.id ? "small-button danger" : "small-button ghost"} type="button" onClick={() => remove(product)}>
