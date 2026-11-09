@@ -79,7 +79,7 @@ function Orders() {
     setConfirm(null);
     if (action === "receipt") {
       setStatus("Sending receipt…");
-      setStatus(await requestReceipt(order.id, true));
+      setStatus(await requestReceipt(order.id, true, "receipt"));
       load();
       return;
     }
@@ -89,22 +89,25 @@ function Orders() {
     if (error) {
       setStatus("That didn't work: " + error.message);
     } else if (action === "paid") {
-      setStatus("Order marked paid. " + (await requestReceipt(order.id, false)));
+      setStatus("Order marked paid. " + (await requestReceipt(order.id, false, "receipt")));
+    } else if (action === "completed") {
+      setStatus("Order completed. " + (await requestReceipt(order.id, false, "completed")));
     } else {
       setStatus("Order updated.");
     }
     load();
   }
 
-  async function requestReceipt(orderId, resend) {
+  async function requestReceipt(orderId, resend, kind) {
     const { data } = await supabase.auth.getSession();
     const response = await fetch("/api/receipt", {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: "Bearer " + (data.session?.access_token || "") },
-      body: JSON.stringify({ orderId, resend })
+      body: JSON.stringify({ orderId, resend, kind })
     });
     const result = await response.json().catch(() => ({}));
-    return result.sent ? "Receipt emailed to the customer." : "Receipt not sent: " + (result.reason || result.error || "unknown problem");
+    const what = kind === "completed" ? "Completed email" : "Receipt";
+    return result.sent ? what + " sent to the customer." : what + " not sent: " + (result.reason || result.error || "unknown problem");
   }
 
   const button = (order, action, label, danger) => {

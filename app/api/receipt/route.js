@@ -13,6 +13,7 @@ export async function POST(request) {
   if (!profile?.is_admin) return NextResponse.json({ error: "Admins only." }, { status: 403 });
 
   const body = await request.json().catch(() => ({}));
-  const result = await sendReceipt(String(body.orderId || ""), { force: Boolean(body.resend) });
+  const kind = body.kind === "completed" ? "completed" : "receipt";
+  const result = await sendReceipt(String(body.orderId || ""), { force: Boolean(body.resend), kind });
   return NextResponse.json(result, { status: result.sent || result.reason === "Already sent." ? 200 : 400 });
 }

@@ -524,3 +524,4 @@ create policy "admins delete product images" on storage.objects for delete to au
 alter table public.orders add column if not exists order_number bigint generated always as identity (start with 1001);
 alter table public.orders add column if not exists receipt_sent_at timestamptz;
 create unique index if not exists orders_order_number on public.orders (order_number);
+alter table public.orders add column if not exists completed_email_sent_at timestamptz;
