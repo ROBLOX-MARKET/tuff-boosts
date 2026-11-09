@@ -506,3 +506,16 @@ begin
   begin alter publication supabase_realtime add table public.chat_messages; exception when duplicate_object then null; end;
   begin alter publication supabase_realtime add table public.chats; exception when duplicate_object then null; end;
 end $$;
+
+-- Product images (safe to run more than once)
+alter table public.products add column if not exists image_url text not null default '';
+
+insert into storage.buckets (id, name, public) values ('product-images', 'product-images', true)
+on conflict (id) do nothing;
+
+drop policy if exists "admins upload product images" on storage.objects;
+create policy "admins upload product images" on storage.objects for insert to authenticated
+  with check (bucket_id = 'product-images' and public.is_admin());
+drop policy if exists "admins delete product images" on storage.objects;
+create policy "admins delete product images" on storage.objects for delete to authenticated
+  using (bucket_id = 'product-images' and public.is_admin());

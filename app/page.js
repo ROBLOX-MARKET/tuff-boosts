@@ -10,6 +10,7 @@ import { discordUrl, useApp } from "@/components/Providers";
 function ProductCard({ product }) {
   return (
     <article className="product">
+      {product.image_url && <img className="product-image" src={product.image_url} alt="" loading="lazy" />}
       <h4>{product.name}</h4>
       <div className="price">{usd(product.price_cents)}</div>
       {product.description && <p>{product.description}</p>}

@@ -1,5 +1,7 @@
 :root {
   color-scheme: dark;
+  --font-display: "Outfit";
+  --font-body: "Manrope";
   --bg: #07090F;
   --panel: #0F141F;
   --panel-2: #171E2C;
@@ -77,6 +79,8 @@ section { padding-block: 54px 0; }
 .product { display: flex; flex-direction: column; gap: 9px; min-width: 0; padding: 22px; background: var(--panel); border: 1px solid var(--line); border-radius: 18px; }
 .product:hover { border-color: var(--sky); }
 .product h4 { font-size: 24px; overflow-wrap: anywhere; }
+.product-image { display: block; width: calc(100% + 44px); max-width: none; aspect-ratio: 4 / 3; margin: -22px -22px 6px; object-fit: cover; border-radius: 18px 18px 0 0; background: var(--panel-2); }
+.thumb { width: 56px; height: 42px; flex: none; object-fit: cover; border-radius: 8px; background: var(--panel); }
 .price { color: var(--sky); font: 800 30px var(--font-display), Arial, sans-serif; font-variant-numeric: tabular-nums; }
 .product p { margin: 0; color: var(--muted); overflow-wrap: anywhere; }
 .product .pill { margin-top: auto; width: 100%; }

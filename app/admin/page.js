@@ -217,7 +217,18 @@ function Customers() {
 
 /* ---------------- Products ---------------- */
 
-const EMPTY_PRODUCT = { name: "", category: "boosts", price: "", sold: "0", description: "" };
+const EMPTY_PRODUCT = { name: "", category: "boosts", price: "", sold: "0", description: "", image_url: "" };
+const IMAGE_TYPES = ["image/png", "image/jpeg", "image/webp", "image/gif"];
+
+async function uploadProductImage(file) {
+  if (!IMAGE_TYPES.includes(file.type)) throw new Error("Use a PNG, JPG, WEBP or GIF image.");
+  if (file.size > 5 * 1024 * 1024) throw new Error("Images must be under 5 MB.");
+  const ext = file.type.split("/")[1].replace("jpeg", "jpg");
+  const path = crypto.randomUUID() + "." + ext;
+  const { error } = await supabase.storage.from("product-images").upload(path, file, { contentType: file.type });
+  if (error) throw new Error("The image didn't upload. Check you ran the image setup in Supabase.");
+  return supabase.storage.from("product-images").getPublicUrl(path).data.publicUrl;
+}
 
 function Products() {
   const [products, setProducts] = useState([]);
@@ -225,6 +236,9 @@ function Products() {
   const [editing, setEditing] = useState(null);
   const [confirm, setConfirm] = useState(null);
   const [status, setStatus] = useState("");
+  const [imageFile, setImageFile] = useState(null);
+  const [fileKey, setFileKey] = useState(0);
+  const [busy, setBusy] = useState(false);
 
   const load = useCallback(async () => {
     const { data } = await supabase.from("products").select("*").order("created_at", { ascending: true });
@@ -242,32 +256,50 @@ function Products() {
       setStatus("Add a name and a price like 4.99.");
       return;
     }
+    setBusy(true);
+    let imageUrl = form.image_url || "";
+    if (imageFile) {
+      try {
+        imageUrl = await uploadProductImage(imageFile);
+      } catch (uploadError) {
+        setBusy(false);
+        setStatus(uploadError.message);
+        return;
+      }
+    }
     const row = {
       name: form.name.trim(),
       category: form.category,
       price_cents: price,
       sold: Math.max(0, Math.floor(Number(form.sold) || 0)),
-      description: form.description.trim()
+      description: form.description.trim(),
+      image_url: imageUrl
     };
     const { error } = editing
       ? await supabase.from("products").update(row).eq("id", editing)
       : await supabase.from("products").insert(row);
+    setBusy(false);
     setStatus(error ? "That didn't save." : (editing ? "Saved " : "Added ") + row.name + ".");
     if (!error) {
       setForm(EMPTY_PRODUCT);
       setEditing(null);
+      setImageFile(null);
+      setFileKey((k) => k + 1);
     }
     load();
   }
 
   function edit(product) {
     setEditing(product.id);
+    setImageFile(null);
+    setFileKey((k) => k + 1);
     setForm({
       name: product.name,
       category: product.category,
       price: (product.price_cents / 100).toFixed(2),
       sold: String(product.sold),
-      description: product.description
+      description: product.description,
+      image_url: product.image_url || ""
     });
   }
 
@@ -302,10 +334,22 @@ function Products() {
           <label>Number sold<input {...field("sold")} type="number" min="0" step="1" /></label>
         </div>
         <label>Description<textarea {...field("description")} rows={2} maxLength={240} /></label>
+        <div className="stack">
+          <label>Image (optional)
+            <input key={fileKey} type="file" accept="image/png,image/jpeg,image/webp,image/gif" onChange={(e) => setImageFile(e.target.files?.[0] || null)} />
+            <span className="hint">PNG, JPG, WEBP or GIF, under 5 MB. Leave empty for no image.</span>
+          </label>
+          {form.image_url && !imageFile && (
+            <div className="row">
+              <img className="thumb" src={form.image_url} alt="" />
+              <button className="small-button ghost" type="button" onClick={() => setForm({ ...form, image_url: "" })}>Remove image</button>
+            </div>
+          )}
+        </div>
         {status && <p className="status-line">{status}</p>}
         <div className="row-actions">
-          <button className="small-button" type="submit">{editing ? "Save changes" : "Add product"}</button>
-          {editing && <button className="small-button ghost" type="button" onClick={() => { setEditing(null); setForm(EMPTY_PRODUCT); }}>Cancel</button>}
+          <button className="small-button" type="submit" disabled={busy}>{busy ? "Saving…" : editing ? "Save changes" : "Add product"}</button>
+          {editing && <button className="small-button ghost" type="button" onClick={() => { setEditing(null); setForm(EMPTY_PRODUCT); setImageFile(null); setFileKey((k) => k + 1); }}>Cancel</button>}
         </div>
       </form>
       <div className="card">
@@ -314,7 +358,8 @@ function Products() {
           <div className="list">
             {products.map((product) => (
               <div className="row" key={product.id}>
-                <div className="row-main">
+                {product.image_url && <img className="thumb" src={product.image_url} alt="" />}
+                <div className="row-main" style={{ flex: 1 }}>
                   <strong>{product.name} · {usd(product.price_cents)}</strong>
                   <span>{CATEGORIES.find((c) => c.id === product.category)?.label} · {product.sold} sold{product.active ? "" : " · Hidden"}</span>
                 </div>
