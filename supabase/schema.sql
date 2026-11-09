@@ -519,3 +519,8 @@ create policy "admins upload product images" on storage.objects for insert to au
 drop policy if exists "admins delete product images" on storage.objects;
 create policy "admins delete product images" on storage.objects for delete to authenticated
   using (bucket_id = 'product-images' and public.is_admin());
+
+-- Order numbers and receipts
+alter table public.orders add column if not exists order_number bigint generated always as identity (start with 1001);
+alter table public.orders add column if not exists receipt_sent_at timestamptz;
+create unique index if not exists orders_order_number on public.orders (order_number);

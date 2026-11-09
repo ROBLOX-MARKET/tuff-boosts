@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { supabaseAdmin, userFromRequest } from "@/lib/supabaseAdmin";
 import { createInvoice } from "@/lib/nowpayments";
 import { CURRENCIES } from "@/lib/money";
+import { sendReceipt } from "@/lib/email";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -35,6 +36,7 @@ export async function POST(request) {
 
   const orderId = data.order_id;
   if (data.total === 0) {
+    await sendReceipt(orderId);
     return NextResponse.json({ paid: true, orderId });
   }
 

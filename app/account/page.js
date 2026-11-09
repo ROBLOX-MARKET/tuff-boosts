@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 import { supabase } from "@/lib/supabase";
-import { REWARD_CENTS, REWARD_STEP_CENTS, STATUS_LABELS, shortDate, usd } from "@/lib/money";
+import { REWARD_CENTS, REWARD_STEP_CENTS, STATUS_LABELS, orderLabel, shortDate, usd } from "@/lib/money";
 import { useApp } from "@/components/Providers";
 
 const REASONS = {
@@ -103,7 +103,7 @@ export default function Account() {
                 <div className="row-main">
                   <strong>{order.product_name}</strong>
                   <span>{shortDate(order.created_at)} · {usd(order.total_cents)}{order.credit_used_cents > 0 ? " + " + usd(order.credit_used_cents) + " credit" : ""}{order.discount_code ? " · code " + order.discount_code : ""}</span>
-                  <span>Order {order.id.slice(0, 8).toUpperCase()}</span>
+                  <span>Order {orderLabel(order)}</span>
                   <span><span className={"badge " + order.status}>{STATUS_LABELS[order.status]}</span></span>
                 </div>
                 {order.status === "awaiting_payment" && (

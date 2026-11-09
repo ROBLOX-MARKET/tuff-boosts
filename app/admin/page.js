@@ -3,7 +3,7 @@
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 import { supabase } from "@/lib/supabase";
-import { CATEGORIES, STATUS_LABELS, shortDate, toCents, usd } from "@/lib/money";
+import { CATEGORIES, STATUS_LABELS, orderLabel, shortDate, toCents, usd } from "@/lib/money";
 import { useApp } from "@/components/Providers";
 
 const TABS = [
@@ -77,11 +77,34 @@ function Orders() {
       return;
     }
     setConfirm(null);
+    if (action === "receipt") {
+      setStatus("Sending receipt…");
+      setStatus(await requestReceipt(order.id, true));
+      load();
+      return;
+    }
     const { error } = action === "refund"
       ? await supabase.rpc("admin_refund_to_credit", { p_order: order.id })
       : await supabase.rpc("admin_set_order_status", { p_order: order.id, p_status: action });
-    setStatus(error ? "That didn't work: " + error.message : "Order updated.");
+    if (error) {
+      setStatus("That didn't work: " + error.message);
+    } else if (action === "paid") {
+      setStatus("Order marked paid. " + (await requestReceipt(order.id, false)));
+    } else {
+      setStatus("Order updated.");
+    }
     load();
+  }
+
+  async function requestReceipt(orderId, resend) {
+    const { data } = await supabase.auth.getSession();
+    const response = await fetch("/api/receipt", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: "Bearer " + (data.session?.access_token || "") },
+      body: JSON.stringify({ orderId, resend })
+    });
+    const result = await response.json().catch(() => ({}));
+    return result.sent ? "Receipt emailed to the customer." : "Receipt not sent: " + (result.reason || result.error || "unknown problem");
   }
 
   const button = (order, action, label, danger) => {
@@ -113,7 +136,7 @@ function Orders() {
             <div className="row" key={order.id}>
               <div className="row-main">
                 <strong>{order.product_name} · {names[order.user_id] || "Customer"}</strong>
-                <span>{shortDate(order.created_at)} · Order {order.id.slice(0, 8).toUpperCase()} · <span className={"badge " + order.status}>{STATUS_LABELS[order.status]}</span></span>
+                <span>{shortDate(order.created_at)} · Order {orderLabel(order)}{order.receipt_sent_at ? " · Receipt sent" : ""} · <span className={"badge " + order.status}>{STATUS_LABELS[order.status]}</span></span>
                 <span>Paid {usd(order.total_cents)} in {order.pay_currency.toUpperCase()}{order.credit_used_cents ? " + " + usd(order.credit_used_cents) + " credit" : ""}{order.discount_code ? " · code " + order.discount_code + " (−" + usd(order.discount_cents) + ")" : ""}</span>
                 <span>Server: {order.server_link}</span>
                 {order.payment_note && <span className="error">{order.payment_note}</span>}
@@ -121,6 +144,7 @@ function Orders() {
               <div className="row-actions">
                 {order.status === "paid" && button(order, "completed", "Mark completed")}
                 {(order.status === "paid" || order.status === "completed") && button(order, "refund", "Refund to credit")}
+                {(order.status === "paid" || order.status === "completed") && button(order, "receipt", order.receipt_sent_at ? "Resend receipt" : "Send receipt")}
                 {(order.status === "awaiting_payment" || order.status === "cancelled") && button(order, "paid", "Mark paid")}
                 {order.status === "awaiting_payment" && button(order, "cancelled", "Cancel")}
               </div>

@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 import { verifyWebhook } from "@/lib/nowpayments";
+import { sendReceipt } from "@/lib/email";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -32,6 +33,7 @@ export async function POST(request) {
       Number(body.price_amount) * 100 >= order.total_cents - 1;
     if (paidEnough) {
       await db.rpc("internal_mark_paid", { p_order: order.id, p_invoice: reference });
+      await sendReceipt(order.id);
     } else {
       await db.from("orders").update({ payment_note: "Payment amount didn't match. Check NOWPayments." }).eq("id", order.id);
     }
