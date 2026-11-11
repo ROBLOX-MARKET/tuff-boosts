@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { supabaseAdmin, userFromRequest } from "@/lib/supabaseAdmin";
 import { sendReceipt } from "@/lib/email";
+import { notifyNewOrder } from "@/lib/discord";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -15,5 +16,6 @@ export async function POST(request) {
   const body = await request.json().catch(() => ({}));
   const kind = body.kind === "completed" ? "completed" : "receipt";
   const result = await sendReceipt(String(body.orderId || ""), { force: Boolean(body.resend), kind });
+  if (kind === "receipt") await notifyNewOrder(String(body.orderId || ""));
   return NextResponse.json(result, { status: result.sent || result.reason === "Already sent." ? 200 : 400 });
 }

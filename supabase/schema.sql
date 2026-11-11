@@ -525,3 +525,5 @@ alter table public.orders add column if not exists order_number bigint generated
 alter table public.orders add column if not exists receipt_sent_at timestamptz;
 create unique index if not exists orders_order_number on public.orders (order_number);
 alter table public.orders add column if not exists completed_email_sent_at timestamptz;
+alter table public.email_settings add column if not exists discord_webhook_url text not null default '';
+alter table public.orders add column if not exists discord_notified_at timestamptz;

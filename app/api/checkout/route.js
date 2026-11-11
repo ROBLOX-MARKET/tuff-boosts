@@ -3,6 +3,7 @@ import { supabaseAdmin, userFromRequest } from "@/lib/supabaseAdmin";
 import { createInvoice } from "@/lib/nowpayments";
 import { CURRENCIES } from "@/lib/money";
 import { sendReceipt } from "@/lib/email";
+import { notifyNewOrder } from "@/lib/discord";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -41,7 +42,7 @@ export async function POST(request) {
 
   const orderId = data.order_id;
   if (data.total === 0) {
-    await sendReceipt(orderId);
+    await Promise.all([sendReceipt(orderId), notifyNewOrder(orderId)]);
     return NextResponse.json({ paid: true, orderId });
   }
 
