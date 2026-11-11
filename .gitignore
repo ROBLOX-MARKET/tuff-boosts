@@ -1,0 +1,4 @@
+.env
+mod_data.json
+mod_data.tmp
+__pycache__/
