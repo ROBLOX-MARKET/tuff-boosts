@@ -220,7 +220,13 @@ class MEBot(commands.Bot):
         self.tree.add_command(giveaway_group)
         guild = discord.Object(id=GUILD_ID)
         self.tree.copy_global_to(guild=guild)
-        await self.tree.sync(guild=guild)
+        try:
+            await self.tree.sync(guild=guild)
+        except discord.Forbidden:
+            log.error(
+                "I can't add my slash commands to server %s. Make sure the bot is in that server and was "
+                "invited with the 'applications.commands' scope, then restart.", GUILD_ID
+            )
         self.loop.create_task(save_loop())
         self.loop.create_task(giveaway_loop())
 
