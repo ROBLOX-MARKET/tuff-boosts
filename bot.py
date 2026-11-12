@@ -532,13 +532,22 @@ async def slowmode(interaction: discord.Interaction, seconds: app_commands.Range
 
 # key: (title, emoji, channel name, button label)
 TICKET_TYPES = {
-    "support": ("Ticket", "🎫", "ticket", "Ticket"),
+    "support": ("Support Ticket", "🎫", "support-ticket", "Ticket"),
     "discord": ("Discord Purchase", "💎", "discord-purchase", "Discord Products"),
     "server": ("Server Design", "🏗️", "server-design", "Server Build"),
     "ingame": ("In-Game Purchase", "🎮", "ingame-purchase", "In-Game Products"),
     "other": ("Purchase", "🛒", "purchase", "Other"),
 }
 PURCHASE_KEYS = ["discord", "server", "ingame", "other"]
+
+# Role pinged (and let in) for each kind of ticket.
+TICKET_PING_ROLES = {
+    "support": 1570359979909849119,
+    "discord": 1570359829057380352,
+    "server": 1570360413336375356,
+    "ingame": 1570360571625345166,
+    "other": 1570360571625345166,
+}
 
 
 def topic_for(user_id: int, key: str) -> str:
@@ -579,9 +588,7 @@ class TicketSelect(discord.ui.Select):
             )
             await interaction.response.send_message(embed=embed, view=PurchaseChoiceView(), ephemeral=True)
         else:
-            await interaction.response.defer(ephemeral=True, thinking=True)
-            message = await open_ticket(interaction.guild, interaction.user, "support")
-            await interaction.followup.send(message, ephemeral=True)
+            await interaction.response.send_modal(SupportModal())
 
         # Reset the dropdown so the same option can be picked again.
         banner = store.data["panels"].get(str(interaction.message.id), BANNER_URL or None)
@@ -589,6 +596,30 @@ class TicketSelect(discord.ui.Select):
             await interaction.message.edit(view=build_panel(banner))
         except discord.HTTPException:
             log.exception("Couldn't reset the ticket panel.")
+
+
+class SupportModal(discord.ui.Modal, title="🎫 Support Ticket"):
+    issue = discord.ui.TextInput(
+        label="What's the issue?",
+        style=discord.TextStyle.paragraph,
+        placeholder="Explain what's wrong or what you need help with",
+        max_length=1000,
+    )
+    extra = discord.ui.TextInput(
+        label="Anything else we should know?",
+        style=discord.TextStyle.paragraph,
+        placeholder="Order ID, screenshots you'll send, anything else (optional)",
+        required=False,
+        max_length=1000,
+    )
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        answers = [("❓ What's the issue?", self.issue.value)]
+        if self.extra.value.strip():
+            answers.append(("📝 Anything else", self.extra.value))
+        message = await open_ticket(interaction.guild, interaction.user, "support", answers)
+        await interaction.followup.send(message, ephemeral=True)
 
 
 class TicketPanelView(discord.ui.LayoutView):
@@ -653,9 +684,10 @@ ticket_lock = asyncio.Lock()
 closing: set[int] = set()
 
 
-async def open_ticket(guild: discord.Guild, member: discord.Member, key: str) -> str:
+async def open_ticket(guild: discord.Guild, member: discord.Member, key: str, answers: list | None = None) -> str:
     title, emoji, slug, _ = TICKET_TYPES[key]
     staff_role = guild.get_role(cfg("staff_role")) if cfg("staff_role") else None
+    ping_role = guild.get_role(TICKET_PING_ROLES.get(key, 0)) or staff_role
     category = guild.get_channel(cfg("ticket_category")) if cfg("ticket_category") else None
     if not isinstance(category, discord.CategoryChannel):
         category = None  # no category set: tickets go at the top of the channel list
@@ -671,8 +703,9 @@ async def open_ticket(guild: discord.Guild, member: discord.Member, key: str) ->
         ),
         member: can_talk,
     }
-    if staff_role is not None:
-        overwrites[staff_role] = can_talk
+    for role in (staff_role, ping_role):
+        if role is not None:
+            overwrites[role] = can_talk
 
     async with ticket_lock:
         topic = topic_for(member.id, key)
@@ -696,19 +729,21 @@ async def open_ticket(guild: discord.Guild, member: discord.Member, key: str) ->
         description=(
             f"👋 Hey {member.mention}, thanks for opening a ticket!\n\n"
             + ("🛒 Tell us **what you'd like to buy**, how many, and how you'd like to pay.\n"
-               if key != "support" else "📝 Tell us **what you need help with** in as much detail as you can.\n")
+               if key != "support" else "✅ Thanks for the details, our support team has been notified.\n")
             + "⏳ A member of staff will be with you shortly, please be patient."
         ),
         colour=COLOUR,
         timestamp=now(),
     )
+    for question, answer in answers or []:
+        embed.add_field(name=question, value=clip(answer, 1024), inline=False)
     embed.set_thumbnail(url=member.display_avatar.url)
     embed.set_footer(text=f"{STORE_NAME} • Opened by {member}")
     await channel.send(
-        content=member.mention + (f" {staff_role.mention}" if staff_role else ""),
+        content=member.mention + (f" {ping_role.mention}" if ping_role else ""),
         embed=embed,
         view=TicketControlsView(),
-        allowed_mentions=discord.AllowedMentions(users=[member], roles=[staff_role] if staff_role else []),
+        allowed_mentions=discord.AllowedMentions(users=[member], roles=[ping_role] if ping_role else []),
     )
     return f"✅ Your ticket is ready: {channel.mention}"
 
