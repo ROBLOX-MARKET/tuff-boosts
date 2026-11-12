@@ -236,6 +236,7 @@ class MEBot(commands.Bot):
     async def on_ready(self) -> None:
         log.info("Logged in as %s", self.user)
         await cache_invites()
+        await upload_chrome_emojis()
 
     async def log_to(self, channel_id: int | None, embed: discord.Embed, file: discord.File | None = None) -> None:
         if not channel_id:
@@ -788,14 +789,44 @@ def build_panel(banner: str | None) -> "TicketPanelView":
     return TicketPanelView(banner)
 
 
+# The bot's own chrome emoji set (emojis/ folder) replaces these server emojis when it's uploaded.
+CHROME_EMOJIS = {
+    "ticket": "me_ticket", "question_mark_glowing": "me_question", "buy": "me_buy",
+    "open_file_folder": "me_folder", "5647vslbank": "me_bank", "ez_timer": "me_timer",
+    "respect": "me_respect", "rules": "me_rules", "no": "me_no",
+}
+EMOJI_DIR = BASE_DIR / "emojis"
+
+
 def server_emoji(name: str, fallback: str):
-    """Your server's custom emoji by name (any capitals), or the normal emoji if it isn't found."""
+    """The chrome emoji if uploaded, else your server's emoji by name, else the normal emoji."""
     guild = bot.get_guild(GUILD_ID)
     if guild is not None:
-        for emoji in guild.emojis:
-            if emoji.name.lower() == name.lower():
-                return emoji
+        for wanted in (CHROME_EMOJIS.get(name.lower()), name):
+            if not wanted:
+                continue
+            for emoji in guild.emojis:
+                if emoji.name.lower() == wanted.lower():
+                    return emoji
     return fallback
+
+
+async def upload_chrome_emojis() -> None:
+    """Add any emoji from the emojis/ folder that the server doesn't have yet."""
+    guild = bot.get_guild(GUILD_ID)
+    if guild is None or not EMOJI_DIR.exists():
+        return
+    have = {e.name.lower() for e in guild.emojis}
+    for path in sorted(EMOJI_DIR.glob("*.png")):
+        if path.stem.lower() in have:
+            continue
+        try:
+            await guild.create_custom_emoji(name=path.stem, image=path.read_bytes(), reason="M&E chrome emoji set")
+            log.info("Added emoji %s", path.stem)
+        except discord.HTTPException as exc:
+            log.error("Couldn't add emoji %s: %s", path.stem, exc)
+            if exc.code == 30008:  # emoji slots full
+                break
 
 
 def E(name: str, fallback: str) -> str:
@@ -893,7 +924,7 @@ class TicketPanelView(discord.ui.LayoutView):
         row = discord.ui.ActionRow()
         row.add_item(TicketSelect())
         parts.append(row)
-        footer = f"-# 💙 {STORE_NAME}" + (f" • {STORE_TAGLINE}" if STORE_TAGLINE else "")
+        footer = f"-# {E('respect', '🤍')} {STORE_NAME}" + (f" • {STORE_TAGLINE}" if STORE_TAGLINE else "")
         parts.append(discord.ui.TextDisplay(footer))
         self.add_item(discord.ui.Container(*parts, accent_color=COLOUR))
 
