@@ -1118,33 +1118,118 @@ class TicketControlsView(discord.ui.View):
             closing.discard(channel.id)
 
 
-async def send_transcript(channel: discord.TextChannel, closed_by: discord.Member, owner_id: int, key: str) -> None:
-    lines = [f"Transcript of #{channel.name} ({STORE_NAME})", f"Closed by {closed_by} at {now():%Y-%m-%d %H:%M UTC}", "=" * 60, ""]
-    count = 0
-    async for m in channel.history(limit=2000, oldest_first=True):
-        count += 1
-        text = m.content
-        for e in m.embeds:
-            text += f"\n  [embed] {e.title or ''} {e.description or ''}".rstrip()
+def _readable(text: str, guild: discord.Guild) -> str:
+    """Swap <@id>, <@&id> and <#id> for names, like Discord shows them."""
+    def user(m):
+        member = guild.get_member(int(m.group(1)))
+        return f"@{member.display_name}" if member else "@user"
+    def role(m):
+        r = guild.get_role(int(m.group(1)))
+        return f"@{r.name}" if r else "@role"
+    def chan(m):
+        c = guild.get_channel(int(m.group(1)))
+        return f"#{c.name}" if c else "#channel"
+    text = re.sub(r"<@!?(\d+)>", user, text or "")
+    text = re.sub(r"<@&(\d+)>", role, text)
+    text = re.sub(r"<#(\d+)>", chan, text)
+    text = re.sub(r"<t:(\d+)(?::\w)?>", lambda m: datetime.fromtimestamp(int(m.group(1)), timezone.utc).strftime("%d/%m/%Y %H:%M"), text)
+    return text
+
+
+async def _fetch(url: str, limit: int = 6 * 1024 * 1024) -> bytes | None:
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as r:
+                if r.status != 200 or int(r.headers.get("Content-Length", 0) or 0) > limit:
+                    return None
+                return await r.read()
+    except Exception:
+        return None
+
+
+async def build_transcript_images(channel: discord.TextChannel, subtitle: str) -> tuple[list[bytes], int]:
+    import transcript as T
+    guild = channel.guild
+    avatars: dict[int, bytes | None] = {}
+    msgs = []
+    async for m in channel.history(limit=1000, oldest_first=True):
+        if m.author.id == guild.me.id and not m.embeds and not m.content:
+            continue
+        if m.author.id not in avatars:
+            try:
+                avatars[m.author.id] = await m.author.display_avatar.replace(size=64, format="png").read()
+            except discord.DiscordException:
+                avatars[m.author.id] = None
+        colour = getattr(m.author, "colour", None)
+        colour = colour.to_rgb() if colour and colour.value else None
+
+        images, files = [], []
         for a in m.attachments:
-            text += f"\n  [file] {a.url}"
-        lines.append(f"[{m.created_at:%Y-%m-%d %H:%M}] {m.author}: {text}")
-    data = "\n".join(lines).encode("utf-8")
+            if (a.content_type or "").startswith("image/") and a.size <= 6 * 1024 * 1024:
+                try:
+                    images.append(await a.read())
+                    continue
+                except discord.DiscordException:
+                    pass
+            files.append(a.filename)
 
+        embeds = []
+        for e in m.embeds:
+            image = await _fetch(e.image.url) if e.image and e.image.url else None
+            embeds.append(T.Embed(
+                colour=e.colour.to_rgb() if e.colour else None,
+                author=_readable(e.author.name or "", guild) if e.author else "",
+                title=_readable(e.title or "", guild),
+                description=_readable(e.description or "", guild),
+                fields=[(_readable(f.name, guild), _readable(f.value, guild)) for f in e.fields],
+                footer=_readable(e.footer.text or "", guild) if e.footer else "",
+                image=image,
+            ))
+        buttons = [c.label for row in m.components for c in getattr(row, "children", []) if getattr(c, "label", None)]
+
+        msgs.append(T.Message(
+            author=m.author.display_name, author_id=m.author.id, colour=colour, bot=m.author.bot,
+            time=m.created_at.strftime("%d/%m/%Y %H:%M"), minute=m.created_at.timestamp(),
+            text=_readable(m.content, guild), avatar=avatars[m.author.id],
+            images=images, files=files, embeds=embeds, buttons=buttons,
+        ))
+    pages = await asyncio.to_thread(T.render, channel.name, subtitle, msgs)
+    return pages, len(msgs)
+
+
+async def send_transcript(channel: discord.TextChannel, closed_by: discord.Member, owner_id: int, key: str) -> None:
     title, emoji, _, _ = TICKET_TYPES.get(key, ("Ticket", "🎫", "", ""))
-    embed = discord.Embed(title=f"📄 Ticket closed • {channel.name}", colour=COLOUR, timestamp=now())
-    embed.add_field(name="📂 Type", value=f"{emoji} {title}", inline=True)
-    embed.add_field(name="👤 Opened by", value=f"<@{owner_id}>", inline=True)
-    embed.add_field(name="🔒 Closed by", value=closed_by.mention, inline=True)
-    embed.add_field(name="💬 Messages", value=str(count), inline=True)
-    await bot.log_to(cfg("transcript_channel"), embed, discord.File(io.BytesIO(data), filename=f"{channel.name}.txt"))
-
     owner = channel.guild.get_member(owner_id)
+    subtitle = f"{title} • opened by {owner.display_name if owner else 'customer'} • closed by {closed_by.display_name}"
+    pages, count = await build_transcript_images(channel, subtitle)
+
+    embed = discord.Embed(
+        description=(
+            f"### {E('me_folder', '📄')} Ticket closed • {channel.name}\n"
+            f"{E('ticket', '📂')} **Type:** {title}\n"
+            f"{E('me_users', '👤')} **Opened by:** <@{owner_id}>\n"
+            f"{E('me_no', '🔒')} **Closed by:** {closed_by.mention}\n"
+            f"{E('me_chart', '💬')} **Messages:** {count}"
+        ),
+        colour=COLOUR,
+        timestamp=now(),
+    )
+
+    def files():
+        return [discord.File(io.BytesIO(p), filename=f"{channel.name}-{i + 1}.png") for i, p in enumerate(pages)]
+
+    target = bot.get_channel(cfg("transcript_channel")) if cfg("transcript_channel") else None
+    if target is not None:
+        batch = files()
+        for start in range(0, len(batch), 10):
+            await target.send(embed=embed if start == 0 else None, files=batch[start:start + 10],
+                              allowed_mentions=discord.AllowedMentions.none())
     if owner:
         try:
+            batch = files()
             await owner.send(
                 embed=discord.Embed(description=f"🔒 Your ticket **{channel.name}** in **{channel.guild.name}** was closed. Here's a copy.", colour=COLOUR),
-                file=discord.File(io.BytesIO(data), filename=f"{channel.name}.txt"),
+                files=batch[:10],
             )
         except (discord.Forbidden, discord.HTTPException):
             pass
