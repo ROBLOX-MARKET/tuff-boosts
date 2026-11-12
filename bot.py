@@ -220,7 +220,7 @@ class MEBot(commands.Bot):
         self.add_view(GiveawayView())
         self.add_view(PingRolesView())
         self.add_view(LegitView())
-        self.add_view(TosView())
+        self.add_view(TosLayout())
         self.add_view(TagCheckView())
         self.tree.add_command(embed_group)
         self.tree.add_command(giveaway_group)
@@ -2277,37 +2277,61 @@ TOS_CHANNEL_ID = 1570046029863067768
 TAG_ROLE_ID = 1570497145524592700
 
 
-def tos_embed() -> discord.Embed:
+def tos_sections() -> list[str]:
     b = "`✦`"
-    text = (
+    return [
         f"# {E('me_rules', '📜')} {STORE_NAME} — Terms of Service\n"
-        f"> Placing an order with **{STORE_NAME}** means you've read and agree to everything below.\n\n"
+        f"> Placing an order with **{STORE_NAME}** means you've read and agree to everything below.",
         f"### {E('me_users', '🤝')} Using Our Services\n"
         f"> {b} Stick to Discord's [Terms of Service](https://discord.com/terms) at all times.\n"
         f"> {b} Be respectful to staff and other customers — no abuse, spam or time-wasting.\n"
         f"> {b} Every order goes through a ticket. We don't take orders in DMs.\n"
-        f"> {b} Double-check what you're buying and the price before you pay.\n\n"
+        f"> {b} Double-check what you're buying and the price before you pay.",
         f"### {E('me_bank', '💳')} Payments\n"
         f"> {b} Full payment is required before we start your order.\n"
         f"> {b} Only use the payment methods we give you in your ticket.\n"
-        f"> {b} Chargebacks or payment disputes = an instant, permanent ban.\n\n"
+        f"> {b} Chargebacks or payment disputes = an instant, permanent ban.",
         f"### {E('me_buy', '📦')} Delivery\n"
         f"> {b} Most orders are delivered quickly, but times can vary depending on stock and demand.\n"
-        f"> {b} Make sure the details you give us (server link, username etc.) are correct — we're not responsible for mistakes on your end.\n\n"
+        f"> {b} Make sure the details you give us (server link, username etc.) are correct — we're not responsible for mistakes on your end.",
         f"### {E('me_restock', '🔁')} Refunds & Replacements\n"
         f"> {b} **No refunds once your order has been started or delivered.**\n"
         f"> {b} If something goes wrong on our side, we'll fix or replace it — just open a ticket.\n"
-        f"> {b} Issues must be reported within **48 hours** of delivery to be covered.\n\n"
+        f"> {b} Issues must be reported within **48 hours** of delivery to be covered.",
         f"### {E('me_no', '⚠️')} Good to Know\n"
         f"> {b} We can refuse or cancel any order, at any time, for any reason.\n"
         f"> {b} These terms can change without notice — it's on you to stay up to date.\n"
-        f"> {b} Buying from us means you accept these terms, whether you've read them or not.\n\n"
-        f"{E('me_servertag', '🏷️')} **Wear our server tag** for **3x giveaway entries** and an exclusive role. Click below to see how!"
-    )
-    embed = discord.Embed(description=text, colour=COLOUR)
-    embed.set_footer(text=f"{STORE_NAME} • Last updated")
-    embed.timestamp = now()
-    return embed
+        f"> {b} Buying from us means you accept these terms, whether you've read them or not.",
+        f"### {E('me_servertag', '🏷️')} Wear our server tag\n"
+        f"Get **3x giveaway entries** and an exclusive role. Click **Server Tag** below to see how!",
+    ]
+
+
+class TosTagButton(discord.ui.Button):
+    def __init__(self):
+        super().__init__(label="Server Tag", emoji=server_emoji("me_servertag", "🏷️"),
+                         style=discord.ButtonStyle.secondary, custom_id="me:servertag")
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        await interaction.response.send_message(embed=tag_guide_embed(), view=TagCheckView(), ephemeral=True)
+
+
+class TosLayout(discord.ui.LayoutView):
+    def __init__(self, banner: str | None = None):
+        super().__init__(timeout=None)
+        parts: list[discord.ui.Item] = []
+        if banner:
+            parts.append(discord.ui.MediaGallery(discord.MediaGalleryItem(media=banner)))
+        sections = tos_sections()
+        for i, text in enumerate(sections):
+            parts.append(discord.ui.TextDisplay(text))
+            if i < len(sections) - 1:
+                parts.append(discord.ui.Separator())
+        row = discord.ui.ActionRow()
+        row.add_item(TosTagButton())
+        parts.append(row)
+        parts.append(discord.ui.TextDisplay(f"-# {E('me_respect', '🤍')} {STORE_NAME} • Thanks for shopping with us"))
+        self.add_item(discord.ui.Container(*parts, accent_color=COLOUR))
 
 
 def wears_tag(user: discord.abc.User) -> bool:
@@ -2353,16 +2377,6 @@ def tag_guide_embed() -> discord.Embed:
         colour=COLOUR,
     )
     return embed
-
-
-class TosView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
-        self.tag.emoji = server_emoji("me_servertag", "🏷️")
-
-    @discord.ui.button(label="Server Tag", style=discord.ButtonStyle.secondary, custom_id="me:servertag")
-    async def tag(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        await interaction.response.send_message(embed=tag_guide_embed(), view=TagCheckView(), ephemeral=True)
 
 
 class TagCheckView(discord.ui.View):
@@ -2420,12 +2434,12 @@ async def tag_sync_loop() -> None:
 
 
 async def send_tos(channel: discord.abc.Messageable) -> discord.Message:
-    kwargs = {"embed": tos_embed(), "view": TosView()}
     if BANNER_FILE.exists():
-        kwargs["file"] = discord.File(BANNER_FILE)
-        kwargs["embed"].set_image(url=f"attachment://{BANNER_FILE.name}")
-    message = await channel.send(**kwargs)
-    store.data["tos_post"] = {"channel": channel.id, "message": message.id}
+        ref = f"attachment://{BANNER_FILE.name}"
+        message = await channel.send(view=TosLayout(ref), file=discord.File(BANNER_FILE))
+    else:
+        message = await channel.send(view=TosLayout(BANNER_URL or None))
+    store.data["tos_post"] = {"channel": channel.id, "message": message.id, "style": "panel"}
     store.save()
     return message
 
@@ -2438,11 +2452,9 @@ async def post_tos_once() -> None:
     if saved:
         try:
             message = await bot.get_channel(saved["channel"]).fetch_message(saved["message"])
-            embed = tos_embed()
-            if message.embeds and message.embeds[0].image:
-                embed.set_image(url=message.embeds[0].image.url)
-            await message.edit(embed=embed, view=TosView())
-            return
+            if saved.get("style") == "panel":
+                return
+            await message.delete()  # old embed version: replace it with the wide panel
         except (discord.NotFound, AttributeError):
             pass
         except discord.HTTPException:
