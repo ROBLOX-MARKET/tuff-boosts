@@ -2131,7 +2131,7 @@ class LegitView(discord.ui.View):
 
 
 async def send_legit_panel(channel: discord.abc.Messageable) -> discord.Message:
-    kwargs = {"embed": legit_embed(), "view": LegitView()}
+    kwargs = {"embed": legit_embed()}
     if BANNER_FILE.exists():
         kwargs["file"] = discord.File(BANNER_FILE)
         kwargs["embed"].set_image(url=f"attachment://{BANNER_FILE.name}")
@@ -2157,7 +2157,7 @@ async def post_legit_panel_once() -> None:
             embed = legit_embed()
             if message.embeds and message.embeds[0].image:
                 embed.set_image(url=message.embeds[0].image.url)
-            await message.edit(embed=embed, view=LegitView())
+            await message.edit(embed=embed, view=None)
             return
         except (discord.NotFound, AttributeError):
             pass
