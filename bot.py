@@ -786,6 +786,20 @@ def build_panel(banner: str | None) -> "TicketPanelView":
     return TicketPanelView(banner)
 
 
+def server_emoji(name: str, fallback: str):
+    """Your server's custom emoji by name (any capitals), or the normal emoji if it isn't found."""
+    guild = bot.get_guild(GUILD_ID)
+    if guild is not None:
+        for emoji in guild.emojis:
+            if emoji.name.lower() == name.lower():
+                return emoji
+    return fallback
+
+
+def E(name: str, fallback: str) -> str:
+    return str(server_emoji(name, fallback))
+
+
 class TicketSelect(discord.ui.Select):
     def __init__(self):
         super().__init__(
@@ -794,8 +808,8 @@ class TicketSelect(discord.ui.Select):
             min_values=1,
             max_values=1,
             options=[
-                discord.SelectOption(label="Ticket", value="support", emoji="🎫", description="Help, questions or problems"),
-                discord.SelectOption(label="Purchase", value="purchase", emoji="🛒", description="Buy Discord products, server builds and more"),
+                discord.SelectOption(label="Ticket", value="support", emoji=server_emoji("Ticket", "🎫"), description="Help, questions or problems"),
+                discord.SelectOption(label="Purchase", value="purchase", emoji=server_emoji("buy", "🛒"), description="Buy Discord products, server builds and more"),
             ],
         )
 
@@ -852,7 +866,7 @@ class TicketPanelView(discord.ui.LayoutView):
         if banner:
             parts.append(discord.ui.MediaGallery(discord.MediaGalleryItem(media=banner)))
 
-        heading = f"# 🎫 {STORE_NAME} Support"
+        heading = f"# {E('Ticket', '🎫')} {STORE_NAME} Support"
         if STORE_TAGLINE:
             heading += f"\n-# {STORE_TAGLINE}"
         parts.append(discord.ui.TextDisplay(heading))
@@ -860,19 +874,19 @@ class TicketPanelView(discord.ui.LayoutView):
 
         rules = f" in <#{cfg('rules_channel')}>" if cfg("rules_channel") else ""
         parts.append(discord.ui.TextDisplay(
-            "### 📌 Before you open a ticket\n"
-            "> 🚫 **No troll tickets.** Joke or empty tickets get closed and may lead to a punishment.\n"
-            "> ⏳ **Be patient.** Staff will reply as soon as they can, please don't ping them.\n"
-            "> 📝 **Be clear.** Say exactly what you need in your first message.\n"
-            "> 💳 **Buying?** Have your payment method ready to speed things up.\n"
-            "> 🤝 **Be respectful** to staff at all times.\n"
-            f"> 📜 Make sure you've read the rules{rules}."
+            f"### {E('Rules', '📌')} Before you open a ticket\n"
+            f"> {E('No', '🚫')} **No troll tickets.** Joke or empty tickets get closed and may lead to a punishment.\n"
+            f"> {E('ez_timer', '⏳')} **Be patient.** Staff will reply as soon as they can, please don't ping them.\n"
+            f"> {E('Question_Mark_Glowing', '📝')} **Be clear.** Say exactly what you need in your first message.\n"
+            f"> {E('5647vslbank', '💳')} **Buying?** Have your payment method ready to speed things up.\n"
+            f"> {E('respect', '🤝')} **Be respectful** to staff at all times.\n"
+            f"> {E('Rules', '📜')} Make sure you've read the rules{rules}."
         ))
         parts.append(discord.ui.Separator())
         parts.append(discord.ui.TextDisplay(
-            "### 🧭 How can we help?\n"
-            "🎫 **Ticket** • help, questions or problems\n"
-            "🛒 **Purchase** • Discord products, server builds, in-game products and more"
+            f"### {E('open_file_folder', '📂')} How can we help?\n"
+            f"{E('Ticket', '🎫')} **Ticket** • help, questions or problems\n"
+            f"{E('buy', '🛒')} **Purchase** • Discord products, server builds, in-game products and more"
         ))
         row = discord.ui.ActionRow()
         row.add_item(TicketSelect())
