@@ -221,6 +221,7 @@ class MEBot(commands.Bot):
         self.add_view(PingRolesView())
         self.add_view(LegitView())
         self.add_view(TosLayout())
+        self.add_view(InfoLayout())
         self.add_view(TagCheckView())
         self.tree.add_command(embed_group)
         self.tree.add_command(giveaway_group)
@@ -257,6 +258,7 @@ class MEBot(commands.Bot):
         await post_roles_panel_once()
         await post_legit_panel_once()
         await post_tos_once()
+        await post_info_once()
         self.loop.create_task(tag_sync_loop())
 
     async def log_to(self, channel_id: int | None, embed: discord.Embed, file: discord.File | None = None) -> None:
@@ -2302,8 +2304,6 @@ def tos_sections() -> list[str]:
         f"> {b} We can refuse or cancel any order, at any time, for any reason.\n"
         f"> {b} These terms can change without notice — it's on you to stay up to date.\n"
         f"> {b} Buying from us means you accept these terms, whether you've read them or not.",
-        f"### {E('me_servertag', '🏷️')} Wear our server tag\n"
-        f"Get **3x giveaway entries** and an exclusive role. Click **Server Tag** below to see how!",
     ]
 
 
@@ -2327,9 +2327,6 @@ class TosLayout(discord.ui.LayoutView):
             parts.append(discord.ui.TextDisplay(text))
             if i < len(sections) - 1:
                 parts.append(discord.ui.Separator())
-        row = discord.ui.ActionRow()
-        row.add_item(TosTagButton())
-        parts.append(row)
         parts.append(discord.ui.TextDisplay(f"-# {E('me_respect', '🤍')} {STORE_NAME} • Thanks for shopping with us"))
         self.add_item(discord.ui.Container(*parts, accent_color=COLOUR))
 
@@ -2439,7 +2436,7 @@ async def send_tos(channel: discord.abc.Messageable) -> discord.Message:
         message = await channel.send(view=TosLayout(ref), file=discord.File(BANNER_FILE))
     else:
         message = await channel.send(view=TosLayout(BANNER_URL or None))
-    store.data["tos_post"] = {"channel": channel.id, "message": message.id, "style": "panel"}
+    store.data["tos_post"] = {"channel": channel.id, "message": message.id, "style": "panel2"}
     store.save()
     return message
 
@@ -2452,9 +2449,9 @@ async def post_tos_once() -> None:
     if saved:
         try:
             message = await bot.get_channel(saved["channel"]).fetch_message(saved["message"])
-            if saved.get("style") == "panel":
+            if saved.get("style") == "panel2":
                 return
-            await message.delete()  # old embed version: replace it with the wide panel
+            await message.delete()  # older version: replace it
         except (discord.NotFound, AttributeError):
             pass
         except discord.HTTPException:
@@ -2473,6 +2470,106 @@ async def tos_panel_cmd(interaction: discord.Interaction) -> None:
     await interaction.response.defer(ephemeral=True)
     await send_tos(interaction.channel)
     await interaction.followup.send("✅ Terms of Service posted.", ephemeral=True)
+
+
+
+# ===========================================================================
+# Server info panel (About, Offers, Owners, Rules link, Server Tag)
+# ===========================================================================
+
+INFO_CHANNEL_ID = 1570046519200059423
+OWNER_IDS = [1492971645747593256, 1001419810699223071]  # Munzy, Ehsan
+SERVER_CREATED = "08/11/2026"
+SERVER_UPDATED = "12/11/2026"
+
+
+def info_sections() -> list[str]:
+    b = "`✦`"
+    owners = " & ".join(f"<@{i}>" for i in OWNER_IDS)
+    return [
+        f"# {E('me_users', '👋')} About Us\n"
+        f"**{STORE_NAME}** is a shop run by {owners}, built to make buying Discord and gaming products "
+        "simple, fast and safe. Whether you're growing a server, kitting out your profile or grabbing "
+        "something in-game, we keep it quick, fairly priced and hassle-free, with real people handling "
+        "every order.",
+        f"### {E('me_buy', '🛍️')} What We Offer\n"
+        f"> {b} **Discord products**: Nitro, server boosts and members\n"
+        f"> {b} **Server builds**: custom setups and full server designs\n"
+        f"> {b} **In-game products** for the games you play\n"
+        f"> {b} **Giveaways** and exclusive deals for members\n"
+        f"> {b} **Fast support** through tickets, 7 days a week",
+        f"### {E('me_rules', '📋')} Server Info\n"
+        f"> {b} **Owners:** {owners}\n"
+        f"> {b} **Created on:** `{SERVER_CREATED}`\n"
+        f"> {b} **Last updated:** `{SERVER_UPDATED}`\n"
+        f"> {b} **Rules:** make sure you read <#{TOS_CHANNEL_ID}> before buying",
+        f"### {E('me_servertag', '🏷️')} Wear our server tag\n"
+        f"Show the **{STORE_NAME}** tag next to your name and get **3x giveaway entries** "
+        f"plus the exclusive <@&{TAG_ROLE_ID}> role. Click **Server Tag** below to see how!",
+    ]
+
+
+class InfoLayout(discord.ui.LayoutView):
+    def __init__(self, banner: str | None = None):
+        super().__init__(timeout=None)
+        parts: list[discord.ui.Item] = []
+        if banner:
+            parts.append(discord.ui.MediaGallery(discord.MediaGalleryItem(media=banner)))
+        sections = info_sections()
+        for i, text in enumerate(sections):
+            parts.append(discord.ui.TextDisplay(text))
+            parts.append(discord.ui.Separator())
+        row = discord.ui.ActionRow()
+        row.add_item(TosTagButton())
+        row.add_item(discord.ui.Button(
+            label="Read the rules", emoji=server_emoji("me_rules", "📜"), style=discord.ButtonStyle.link,
+            url=f"https://discord.com/channels/{GUILD_ID}/{TOS_CHANNEL_ID}",
+        ))
+        parts.append(row)
+        parts.append(discord.ui.TextDisplay(f"-# {E('me_respect', '🤍')} {STORE_NAME}"))
+        self.add_item(discord.ui.Container(*parts, accent_color=COLOUR))
+
+
+async def send_info(channel: discord.abc.Messageable) -> discord.Message:
+    if BANNER_FILE.exists():
+        message = await channel.send(view=InfoLayout(f"attachment://{BANNER_FILE.name}"), file=discord.File(BANNER_FILE),
+                                     allowed_mentions=discord.AllowedMentions.none())
+    else:
+        message = await channel.send(view=InfoLayout(BANNER_URL or None), allowed_mentions=discord.AllowedMentions.none())
+    store.data["info_post"] = {"channel": channel.id, "message": message.id, "version": SERVER_UPDATED}
+    store.save()
+    return message
+
+
+async def post_info_once() -> None:
+    saved = store.data.get("info_post")
+    channel = bot.get_channel(INFO_CHANNEL_ID)
+    if channel is None:
+        return
+    if saved:
+        try:
+            message = await bot.get_channel(saved["channel"]).fetch_message(saved["message"])
+            if saved.get("version") == SERVER_UPDATED:
+                return
+            await message.delete()  # details changed: repost
+        except (discord.NotFound, AttributeError):
+            pass
+        except discord.HTTPException:
+            return
+    try:
+        await send_info(channel)
+        log.info("Posted the server info")
+    except discord.HTTPException:
+        log.exception("Couldn't post the server info.")
+
+
+@bot.tree.command(name="infopanel", description="ℹ️ Post the server info panel in this channel (admin)")
+@app_commands.default_permissions(administrator=True)
+@admin_only()
+async def info_panel_cmd(interaction: discord.Interaction) -> None:
+    await interaction.response.defer(ephemeral=True)
+    await send_info(interaction.channel)
+    await interaction.followup.send("✅ Server info posted.", ephemeral=True)
 
 
 # ===========================================================================
