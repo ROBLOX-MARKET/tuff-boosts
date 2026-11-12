@@ -63,6 +63,7 @@ ENV_IDS = {
     "welcome_channel": id_setting("WELCOME_CHANNEL_ID"),
     "auto_role": id_setting("AUTO_ROLE_ID"),
     "rules_channel": id_setting("RULES_CHANNEL_ID"),
+    "flag_channel": id_setting("FLAG_CHANNEL_ID") or 1570152573099319366,
 }
 BANNER_FILE = BASE_DIR / "banner.gif"  # put your banner next to bot.py with this name
 
@@ -1781,7 +1782,7 @@ async def record_join(member: discord.Member, inviter: discord.abc.User, code: s
         embed.add_field(name="📅 Account made", value=ts(member.created_at, "R"), inline=True)
         embed.add_field(name="🚩 Why", value="\n".join(FLAG_TEXT[f] for f in flags), inline=False)
         embed.set_footer(text="Doesn't count towards their invites" if fake else "Still counts, just a heads-up")
-        await bot.log_to(cfg("mod_log_channel"), embed)
+        await bot.log_to(cfg("flag_channel") or cfg("mod_log_channel"), embed)
 
 
 def invites_embed(user: discord.abc.User) -> discord.Embed:
