@@ -237,6 +237,7 @@ class MEBot(commands.Bot):
         log.info("Logged in as %s", self.user)
         await cache_invites()
         await upload_chrome_emojis()
+        await set_avatar()
 
     async def log_to(self, channel_id: int | None, embed: discord.Embed, file: discord.File | None = None) -> None:
         if not channel_id:
@@ -809,6 +810,26 @@ def server_emoji(name: str, fallback: str):
                 if emoji.name.lower() == wanted.lower():
                     return emoji
     return fallback
+
+
+async def set_avatar() -> None:
+    """Set the bot's profile picture from avatar.gif (or avatar.png) once, and again if the file changes."""
+    import hashlib
+    for path in (BASE_DIR / "avatar.gif", BASE_DIR / "avatar.png"):
+        if not path.exists():
+            continue
+        data = path.read_bytes()
+        digest = hashlib.sha256(data).hexdigest()
+        if store.data.get("avatar_hash") == digest:
+            return
+        try:
+            await bot.user.edit(avatar=data)
+            store.data["avatar_hash"] = digest
+            store.save()
+            log.info("Profile picture set from %s", path.name)
+            return
+        except discord.HTTPException as exc:
+            log.error("Couldn't set the profile picture from %s: %s", path.name, exc)
 
 
 async def upload_chrome_emojis() -> None:
