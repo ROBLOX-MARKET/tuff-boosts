@@ -2072,9 +2072,7 @@ def legit_embed() -> discord.Embed:
         description=(
             f"# {tick} Are we legit?\n"
             f"Bought from **{STORE_NAME}** before? Let everyone know!\n\n"
-            f"> {tick} **React with {tick} below** if you've bought from us\n"
-            f"> {E('me_rules', '📝')} **Click Leave a vouch** and fill in the quick form\n"
-            f"> {E('me_timer', '⏱️')} Takes less than **30 seconds**\n\n"
+            f"> {tick} **React with {tick} below** if you've bought from us\n\n"
             f"{E('me_respect', '🤍')} Every vouch helps new customers trust us. **Thank you for your support!**"
         ),
         colour=COLOUR,
@@ -2154,7 +2152,12 @@ async def post_legit_panel_once() -> None:
         return
     if saved:
         try:
-            await bot.get_channel(saved["channel"]).fetch_message(saved["message"])
+            message = await bot.get_channel(saved["channel"]).fetch_message(saved["message"])
+            # Keep the posted panel up to date with the latest wording.
+            embed = legit_embed()
+            if message.embeds and message.embeds[0].image:
+                embed.set_image(url=message.embeds[0].image.url)
+            await message.edit(embed=embed, view=LegitView())
             return
         except (discord.NotFound, AttributeError):
             pass
