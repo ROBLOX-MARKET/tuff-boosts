@@ -14,6 +14,7 @@ import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import aiohttp
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -208,7 +209,7 @@ class MEBot(commands.Bot):
         intents.members = True          # welcome, auto role, invite tracking
         intents.message_content = True  # ticket transcripts
         intents.invites = True          # invite tracking
-        super().__init__(command_prefix=commands.when_mentioned, intents=intents)
+        super().__init__(command_prefix=commands.when_mentioned_or("!"), case_insensitive=True, intents=intents, help_command=None)
         self.invite_cache: dict[str, int] = {}
         self.vanity_cache: int | None = None
 
@@ -453,6 +454,10 @@ async def unban(interaction: discord.Interaction, user_id: str, reason: str = "N
 @app_commands.default_permissions(moderate_members=True)
 @app_commands.checks.has_permissions(moderate_members=True)
 async def logs(interaction: discord.Interaction, user: discord.User) -> None:
+    await reply(interaction, embed=logs_embed(user))
+
+
+def logs_embed(user: discord.abc.User) -> discord.Embed:
     entries = store.data["modlogs"].get(str(user.id), [])
     counts = {key: sum(1 for e in entries if e["action"] == key) for key in ACTION_STYLE}
     embed = discord.Embed(title="📋 Moderation history", colour=COLOUR, timestamp=now())
@@ -472,7 +477,7 @@ async def logs(interaction: discord.Interaction, user: discord.User) -> None:
         embed.add_field(name="🕐 Latest cases", value=clip("\n".join(lines), 1024), inline=False)
     else:
         embed.description = "✨ Clean record, no cases yet."
-    await reply(interaction, embed=embed)
+    return embed
 
 
 @bot.tree.command(name="clearlogs", description="🧹 Wipe someone's moderation history (admin)")
@@ -524,6 +529,222 @@ async def slowmode(interaction: discord.Interaction, seconds: app_commands.Range
     await interaction.channel.edit(slowmode_delay=seconds)
     text = "🐢 Slowmode is off." if seconds == 0 else f"🐢 Slowmode set to **{seconds}s**."
     await reply(interaction, text, ephemeral=False)
+
+
+
+# ===========================================================================
+# ! prefix commands (same as the slash ones)
+# ===========================================================================
+
+
+@bot.event
+async def on_command_error(ctx: commands.Context, error: commands.CommandError) -> None:
+    if isinstance(error, commands.CommandNotFound):
+        return
+    if isinstance(error, commands.MissingPermissions):
+        msg = "❌ You don't have permission to use that."
+    elif isinstance(error, (commands.MissingRequiredArgument, commands.BadArgument, commands.UserNotFound, commands.MemberNotFound)):
+        usage = PREFIX_USAGE.get(ctx.command.name if ctx.command else "", "")
+        msg = f"❌ Usage: `{usage}`" if usage else "❌ That's not quite right, check the command and try again."
+    elif isinstance(error, commands.CommandInvokeError) and isinstance(error.original, discord.Forbidden):
+        msg = "❌ I don't have permission to do that. Move my role higher or give me the permission."
+    else:
+        log.exception("Prefix command error", exc_info=error)
+        msg = "⚠️ Something went wrong."
+    await ctx.reply(msg, mention_author=False)
+
+
+PREFIX_USAGE = {
+    "warn": "!warn @user reason",
+    "mute": "!mute @user 10m reason",
+    "unmute": "!unmute @user [reason]",
+    "kick": "!kick @user [reason]",
+    "ban": "!ban @user [reason]",
+    "unban": "!unban userID [reason]",
+    "logs": "!logs @user",
+    "purge": "!purge 50 [@user]",
+    "slowmode": "!slowmode 10",
+    "steal": "!steal :emoji: [:emoji2:] (or reply to a message with !steal)",
+}
+
+
+@bot.command(name="warn")
+@commands.has_permissions(moderate_members=True)
+async def p_warn(ctx: commands.Context, member: discord.Member, *, reason: str) -> None:
+    if problem := check_target(ctx.author, member):
+        return await ctx.reply(problem, mention_author=False)
+    await dm_user(member, ctx.guild, "warn", reason)
+    case = await record_action(ctx.guild, member, "warn", ctx.author, reason)
+    await ctx.send(embed=action_done("warn", member, reason, case))
+
+
+@bot.command(name="mute", aliases=["timeout"])
+@commands.has_permissions(moderate_members=True)
+async def p_mute(ctx: commands.Context, member: discord.Member, duration: str, *, reason: str = "No reason given") -> None:
+    if problem := check_target(ctx.author, member):
+        return await ctx.reply(problem, mention_author=False)
+    length = parse_duration(duration)
+    if length is None:
+        return await ctx.reply("❌ Use a time like `10m`, `2h`, `1d` or `1d12h`.", mention_author=False)
+    if length > timedelta(days=28):
+        return await ctx.reply("❌ Discord only allows mutes up to 28 days.", mention_author=False)
+    await member.timeout(length, reason=f"{ctx.author}: {reason}")
+    shown = nice_duration(length)
+    await dm_user(member, ctx.guild, "mute", reason, shown)
+    case = await record_action(ctx.guild, member, "mute", ctx.author, reason, shown)
+    await ctx.send(embed=action_done("mute", member, reason, case, shown))
+
+
+@bot.command(name="unmute")
+@commands.has_permissions(moderate_members=True)
+async def p_unmute(ctx: commands.Context, member: discord.Member, *, reason: str = "No reason given") -> None:
+    if not member.is_timed_out():
+        return await ctx.reply("❌ That member isn't muted.", mention_author=False)
+    await member.timeout(None, reason=f"{ctx.author}: {reason}")
+    case = await record_action(ctx.guild, member, "unmute", ctx.author, reason)
+    await ctx.send(embed=action_done("unmute", member, reason, case))
+
+
+@bot.command(name="kick")
+@commands.has_permissions(kick_members=True)
+async def p_kick(ctx: commands.Context, member: discord.Member, *, reason: str = "No reason given") -> None:
+    if problem := check_target(ctx.author, member):
+        return await ctx.reply(problem, mention_author=False)
+    await dm_user(member, ctx.guild, "kick", reason)
+    await member.kick(reason=f"{ctx.author}: {reason}")
+    case = await record_action(ctx.guild, member, "kick", ctx.author, reason)
+    await ctx.send(embed=action_done("kick", member, reason, case))
+
+
+@bot.command(name="ban")
+@commands.has_permissions(ban_members=True)
+async def p_ban(ctx: commands.Context, user: discord.User, *, reason: str = "No reason given") -> None:
+    member = ctx.guild.get_member(user.id)
+    if member is not None:
+        if problem := check_target(ctx.author, member):
+            return await ctx.reply(problem, mention_author=False)
+        await dm_user(member, ctx.guild, "ban", reason)
+    await ctx.guild.ban(user, reason=f"{ctx.author}: {reason}", delete_message_seconds=0)
+    case = await record_action(ctx.guild, user, "ban", ctx.author, reason)
+    await ctx.send(embed=action_done("ban", user, reason, case))
+
+
+@bot.command(name="unban")
+@commands.has_permissions(ban_members=True)
+async def p_unban(ctx: commands.Context, user_id: int, *, reason: str = "No reason given") -> None:
+    try:
+        user = await bot.fetch_user(user_id)
+        await ctx.guild.unban(user, reason=f"{ctx.author}: {reason}")
+    except discord.NotFound:
+        return await ctx.reply("❌ That user isn't banned (or doesn't exist).", mention_author=False)
+    case = await record_action(ctx.guild, user, "unban", ctx.author, reason)
+    await ctx.send(embed=action_done("unban", user, reason, case))
+
+
+@bot.command(name="logs", aliases=["history", "cases"])
+@commands.has_permissions(moderate_members=True)
+async def p_logs(ctx: commands.Context, user: discord.User) -> None:
+    await ctx.send(embed=logs_embed(user))
+
+
+@bot.command(name="purge", aliases=["clear"])
+@commands.has_permissions(manage_messages=True)
+async def p_purge(ctx: commands.Context, amount: int, user: discord.User = None) -> None:
+    amount = max(1, min(amount, 500))
+    check = (lambda m: m.author.id == user.id) if user else (lambda m: True)
+    await ctx.message.delete()
+    deleted = await ctx.channel.purge(limit=amount, check=check, reason=f"Purge by {ctx.author}")
+    await ctx.send(f"🗑️ Deleted **{len(deleted)}** message(s).", delete_after=5)
+
+
+@bot.command(name="lock")
+@commands.has_permissions(manage_channels=True)
+async def p_lock(ctx: commands.Context, *, reason: str = "No reason given") -> None:
+    overwrite = ctx.channel.overwrites_for(ctx.guild.default_role)
+    overwrite.send_messages = False
+    await ctx.channel.set_permissions(ctx.guild.default_role, overwrite=overwrite, reason=reason)
+    await ctx.send(embed=discord.Embed(description=f"🔒 This channel has been locked.\n📝 {clip(reason, 300)}", colour=discord.Colour.red()))
+
+
+@bot.command(name="unlock")
+@commands.has_permissions(manage_channels=True)
+async def p_unlock(ctx: commands.Context) -> None:
+    overwrite = ctx.channel.overwrites_for(ctx.guild.default_role)
+    overwrite.send_messages = None
+    await ctx.channel.set_permissions(ctx.guild.default_role, overwrite=overwrite)
+    await ctx.send(embed=discord.Embed(description="🔓 This channel has been unlocked.", colour=discord.Colour.green()))
+
+
+@bot.command(name="slowmode")
+@commands.has_permissions(manage_channels=True)
+async def p_slowmode(ctx: commands.Context, seconds: int) -> None:
+    seconds = max(0, min(seconds, 21600))
+    await ctx.channel.edit(slowmode_delay=seconds)
+    await ctx.send("🐢 Slowmode is off." if seconds == 0 else f"🐢 Slowmode set to **{seconds}s**.")
+
+
+# ===========================================================================
+# Steal emojis (/steal and !steal)
+# ===========================================================================
+
+EMOJI_RE = re.compile(r"<(a?):([A-Za-z0-9_]{2,32}):(\d{15,25})>")
+
+
+async def steal_emojis(guild: discord.Guild, text: str, by: discord.abc.User, name: str | None = None) -> discord.Embed:
+    found = list(dict.fromkeys(EMOJI_RE.findall(text or "")))[:10]
+    if not found:
+        return discord.Embed(description="❌ I couldn't find any custom emojis there. Use a custom emoji like `:pepe:` from another server.", colour=discord.Colour.red())
+
+    added, failed = [], []
+    async with aiohttp.ClientSession() as session:
+        for animated, emoji_name, emoji_id in found:
+            final_name = (name if name and len(found) == 1 else emoji_name)[:32]
+            url = f"https://cdn.discordapp.com/emojis/{emoji_id}.{'gif' if animated else 'png'}"
+            try:
+                async with session.get(url) as resp:
+                    if resp.status != 200:
+                        raise ValueError("download failed")
+                    data = await resp.read()
+                emoji = await guild.create_custom_emoji(name=final_name, image=data, reason=f"Stolen by {by}")
+                added.append(str(emoji))
+            except discord.Forbidden:
+                return discord.Embed(description="❌ I need the **Manage Expressions** permission to add emojis.", colour=discord.Colour.red())
+            except discord.HTTPException as exc:
+                reason = "server emoji slots are full" if exc.code == 30008 else "Discord refused it"
+                failed.append(f"`{emoji_name}` ({reason})")
+            except (aiohttp.ClientError, ValueError):
+                failed.append(f"`{emoji_name}` (couldn't download)")
+
+    embed = discord.Embed(title="🥷 Emoji steal", colour=discord.Colour.green() if added else discord.Colour.red())
+    if added:
+        embed.add_field(name=f"✅ Added ({len(added)})", value=" ".join(added), inline=False)
+    if failed:
+        embed.add_field(name=f"❌ Failed ({len(failed)})", value="\n".join(failed), inline=False)
+    return embed
+
+
+@bot.tree.command(name="steal", description="🥷 Add emojis from other servers to this one")
+@app_commands.default_permissions(manage_expressions=True)
+@app_commands.checks.has_permissions(manage_expressions=True)
+@app_commands.describe(emojis="Paste one or more custom emojis", name="New name (only when stealing one emoji)")
+async def steal_slash(interaction: discord.Interaction, emojis: str, name: str = None) -> None:
+    await interaction.response.defer()
+    await interaction.followup.send(embed=await steal_emojis(interaction.guild, emojis, interaction.user, name))
+
+
+@bot.command(name="steal", aliases=["stealemoji", "addemoji"])
+@commands.has_permissions(manage_expressions=True)
+async def steal_prefix(ctx: commands.Context, *, emojis: str = "") -> None:
+    text = emojis
+    if not EMOJI_RE.search(text) and ctx.message.reference:
+        ref = ctx.message.reference.resolved
+        if ref is None and ctx.message.reference.message_id:
+            ref = await ctx.channel.fetch_message(ctx.message.reference.message_id)
+        text = getattr(ref, "content", "") or ""
+    if not EMOJI_RE.search(text):
+        return await ctx.reply(f"❌ Usage: `{PREFIX_USAGE['steal']}`", mention_author=False)
+    async with ctx.typing():
+        await ctx.send(embed=await steal_emojis(ctx.guild, text, ctx.author))
 
 
 # ===========================================================================
@@ -1065,6 +1286,7 @@ async def on_message(message: discord.Message) -> None:
     key = str(message.author.id)
     store.data["messages"][key] = store.data["messages"].get(key, 0) + 1
     store.dirty = True
+    await bot.process_commands(message)
 
 
 @bot.tree.command(name="invites", description="📨 See how many people someone has invited")
