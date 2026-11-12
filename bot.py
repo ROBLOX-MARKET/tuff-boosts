@@ -1335,25 +1335,47 @@ async def on_member_join(member: discord.Member) -> None:
         log.exception("Couldn't send the welcome message.")
 
 
+WELCOME_CHANNELS = [1570050759913902170, 1570045204570837082, 1570045690028097556]
+
+
+def ordinal(n: int) -> str:
+    suffix = "th" if 10 <= n % 100 <= 20 else {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+    return f"{n:,}{suffix}"
+
+
 async def send_welcome(channel: discord.abc.Messageable, member: discord.Member, inviter, how: str, test: bool = False) -> None:
+    guild = member.guild
     if how == "invite" and inviter is not None:
-        joined = f"📨 You were invited by {inviter.mention} (**{store.data['invites'].get(str(inviter.id), 0)}** invites)"
+        joined = f"{E('ticket', '📨')} Invited by {inviter.mention} (**{store.data['invites'].get(str(inviter.id), 0)}** invites)"
     elif how == "vanity":
-        code = member.guild.vanity_url_code
-        joined = "🔗 You joined through the server vanity link" + (f" (discord.gg/{code})" if code else "")
+        code = guild.vanity_url_code
+        joined = f"{E('ticket', '🔗')} Joined through the server vanity link" + (f" (discord.gg/{code})" if code else "")
     else:
-        joined = "📨 We couldn't tell which invite you used"
-    embed = discord.Embed(
-        description=(
-            f"## 👋 Welcome, {member.mention}!\n"
-            f"🎉 We are now at **{member.guild.member_count:,}** members!\n"
-            f"{joined}"
-        ),
-        colour=COLOUR,
-        timestamp=now(),
+        joined = ""
+
+    branches = []
+    for i, channel_id in enumerate(WELCOME_CHANNELS):
+        branch = "╰" if i == len(WELCOME_CHANNELS) - 1 else "├"
+        branches.append(f"> {branch} <#{channel_id}>")
+
+    lines = [
+        f"# {E('respect', '👋')} Welcome to {STORE_NAME}",
+        "**Explore our server to discover our products and services. "
+        "Check out the channels below to get started.**",
+        "",
+        *branches,
+        "",
+    ]
+    if joined:
+        lines += [joined, ""]
+    lines.append(f"{E('respect', '🤍')} We hope you enjoy your experience with us!")
+
+    embed = discord.Embed(description="\n".join(lines), colour=COLOUR, timestamp=now())
+    embed.set_author(name=f"{member.display_name} has joined {STORE_NAME}!", icon_url=member.display_avatar.url)
+    embed.set_footer(
+        text=f"You are our {ordinal(guild.member_count or 0)} to join!" + (" • test" if test else ""),
+        icon_url=guild.icon.url if guild.icon else None,
     )
-    embed.set_thumbnail(url=member.display_avatar.url)
-    embed.set_footer(text=f"{STORE_NAME}" + (" • test" if test else ""), icon_url=member.guild.icon.url if member.guild.icon else None)
     file = None
     if WELCOME_BANNER_URL:
         embed.set_image(url=WELCOME_BANNER_URL)
@@ -1361,8 +1383,7 @@ async def send_welcome(channel: discord.abc.Messageable, member: discord.Member,
         file = discord.File(BANNER_FILE)
         embed.set_image(url=f"attachment://{BANNER_FILE.name}")
     kwargs = {"embed": embed, "allowed_mentions": discord.AllowedMentions(users=[member] if not test else [])}
-    if not test:
-        kwargs["content"] = member.mention
+    kwargs["content"] = member.mention
     if file:
         kwargs["file"] = file
     await channel.send(**kwargs)
