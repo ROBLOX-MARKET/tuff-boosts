@@ -1749,12 +1749,17 @@ def mask(code: str | None) -> str:
     return f"`{code[:5]}***`" if code else "`unknown`"
 
 
-FLAG_TEXT = {
-    "rejoin": "🔁 Rejoin (was in the server before)",
-    "alt": f"👤 Possible alt (account under {ALT_DAYS} days old)",
-    "new": f"🆕 New account (under {NEW_ACCOUNT_DAYS} days old)",
-    "self": "🪞 Used their own invite",
-}
+def flag_text(flag: str) -> str:
+    return {
+        "rejoin": f"{E('me_door', '🔁')} Rejoin (was in the server before)",
+        "alt": f"{E('me_no', '👤')} Possible alt (account under {ALT_DAYS} days old)",
+        "new": f"{E('me_timer', '🆕')} New account (under {NEW_ACCOUNT_DAYS} days old)",
+        "self": f"{E('me_no', '🪞')} Used their own invite",
+    }[flag]
+
+
+def flag_short(flag: str) -> str:
+    return {"rejoin": "Rejoin", "alt": "Possible alt", "new": "New account", "self": "Self-invite"}[flag]
 
 
 async def record_join(member: discord.Member, inviter: discord.abc.User, code: str | None) -> None:
@@ -1774,36 +1779,44 @@ async def record_join(member: discord.Member, inviter: discord.abc.User, code: s
     store.save()
 
     if flags:
-        # Staff only: goes to the mod log, nobody gets pinged.
-        embed = discord.Embed(title="🚩 Flagged invite", colour=discord.Colour.orange(), timestamp=now())
+        # Staff only: goes to the flag channel, nobody gets pinged.
+        embed = discord.Embed(
+            description=(
+                f"### {E('me_flag', '🚩')} Flagged invite\n"
+                f"{E('me_users', '👤')} **Joined:** {member.mention} `{member.id}`\n"
+                f"{E('me_invite', '📨')} **Invited by:** {inviter.mention} `{inviter.id}`\n"
+                f"{E('me_timer', '📅')} **Account made:** {ts(member.created_at, 'R')}\n\n"
+                f"**Why it's flagged**\n" + "\n".join(f"> {flag_text(f)}" for f in flags)
+            ),
+            colour=discord.Colour.orange(),
+            timestamp=now(),
+        )
         embed.set_thumbnail(url=member.display_avatar.url)
-        embed.add_field(name="👤 Joined", value=f"{member.mention}\n`{member.id}`", inline=True)
-        embed.add_field(name="📨 Invited by", value=f"{inviter.mention}\n`{inviter.id}`", inline=True)
-        embed.add_field(name="📅 Account made", value=ts(member.created_at, "R"), inline=True)
-        embed.add_field(name="🚩 Why", value="\n".join(FLAG_TEXT[f] for f in flags), inline=False)
         embed.set_footer(text="Doesn't count towards their invites" if fake else "Still counts, just a heads-up")
         await bot.log_to(cfg("flag_channel") or cfg("mod_log_channel"), embed)
 
 
 def invites_embed(user: discord.abc.User) -> discord.Embed:
     c = invite_counts(user.id)
-    embed = discord.Embed(
-        title=user.display_name,
-        description=(f"You currently have **{c['total']}** invites. "
-                     f"(**{c['regular']}** regular, **{c['left']}** left, **{c['fake']}** fake, **{c['bonus']}** bonus)"),
-        colour=COLOUR,
-    )
-    embed.set_thumbnail(url=user.display_avatar.url)
     items = list(reversed(current_joins(user.id)))
     lines = []
     for j in items[:10]:
-        status = " · 👋 left" if j.get("left") else ""
+        status = f" · {E('me_door', '👋')} left" if j.get("left") else ""
         lines.append(f"<@{j['m']}> — {mask(j.get('code'))} · {ts(j['t'], 'R')}{status}")
-    if lines:
-        more = f"\n*…and {len(items) - 10} more*" if len(items) > 10 else ""
-        embed.add_field(name="👥 Who they invited", value="\n".join(lines) + more, inline=False)
-    else:
-        embed.add_field(name="👥 Who they invited", value="Nobody yet.", inline=False)
+    if not lines:
+        lines = ["Nobody yet."]
+    elif len(items) > 10:
+        lines.append(f"*…and {len(items) - 10} more*")
+    embed = discord.Embed(
+        description=(
+            f"### {E('me_invite', '📨')} {user.display_name}\n"
+            f"You currently have **{c['total']}** invites. "
+            f"(**{c['regular']}** regular, **{c['left']}** left, **{c['fake']}** fake, **{c['bonus']}** bonus)\n\n"
+            f"### {E('me_users', '👥')} Who they invited\n" + "\n".join(lines)
+        ),
+        colour=COLOUR,
+    )
+    embed.set_thumbnail(url=user.display_avatar.url)
     board = leaderboard()
     rank = next((i + 1 for i, (uid, _) in enumerate(board) if uid == user.id), None)
     footer = f"Ranked #{rank} on /leaderboard invites" if rank else "Not on /leaderboard invites yet"
@@ -1817,44 +1830,48 @@ class InvitesView(discord.ui.View):
     def __init__(self, user: discord.abc.User):
         super().__init__(timeout=900)
         self.user = user
+        self.past.emoji = server_emoji("me_folder", "📜")
+        self.flags.emoji = server_emoji("me_flag", "🚩")
 
-    @discord.ui.button(label="Past invites", emoji="📜", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="Past invites", style=discord.ButtonStyle.secondary)
     async def past(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         items = [j for j in joins() if j["inv"] == self.user.id]
         since = reset_time(self.user.id)
-        embed = discord.Embed(title=f"📜 {self.user.display_name}'s invite history", colour=COLOUR)
+        show_flags = isinstance(interaction.user, discord.Member) and is_staff(interaction.user)
+        head = f"### {E('me_folder', '📜')} {self.user.display_name}'s invite history\n"
+        embed = discord.Embed(colour=COLOUR)
         if not items:
-            embed.description = "No invites on record."
+            embed.description = head + "No invites on record."
         else:
-            show_flags = isinstance(interaction.user, discord.Member) and is_staff(interaction.user)
             lines = []
             for j in reversed(items[-25:]):
                 bits = [f"<@{j['m']}>", ts(j["t"], "d")]
                 if j["t"] < since:
-                    bits.append("🗑️ before reset")
+                    bits.append("before reset")
                 if j.get("left"):
-                    bits.append("👋 left")
+                    bits.append(f"{E('me_door', '👋')} left")
                 if show_flags and j.get("flags"):
-                    bits.append("🚩 " + ", ".join(FLAG_TEXT[f].split(" (")[0] for f in j["flags"]))
+                    bits.append(f"{E('me_flag', '🚩')} " + ", ".join(flag_short(f) for f in j["flags"]))
                 lines.append(" · ".join(bits))
-            embed.description = f"All **{len(items)}** people they've ever invited (latest 25):\n\n" + "\n".join(lines)
-            rejoins = sum(1 for j in items if "rejoin" in j.get("flags", []))
+            embed.description = head + f"All **{len(items)}** people they've ever invited (latest 25):\n\n" + "\n".join(lines)
             if show_flags:
+                rejoins = sum(1 for j in items if "rejoin" in j.get("flags", []))
                 embed.set_footer(text=f"Staff view • {rejoins} rejoin(s) on record")
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    @discord.ui.button(label="Flags", emoji="🚩", style=discord.ButtonStyle.danger)
+    @discord.ui.button(label="Flags", style=discord.ButtonStyle.danger)
     async def flags(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         if not (isinstance(interaction.user, discord.Member) and is_staff(interaction.user)):
-            return await interaction.response.send_message("❌ Only staff can see flags.", ephemeral=True)
+            return await interaction.response.send_message(f"{E('me_no', '❌')} Only staff can see flags.", ephemeral=True)
         items = [j for j in joins() if j["inv"] == self.user.id and j.get("flags")]
-        embed = discord.Embed(title=f"🚩 Flagged invites for {self.user.display_name}", colour=discord.Colour.orange())
+        head = f"### {E('me_flag', '🚩')} Flagged invites for {self.user.display_name}\n"
+        embed = discord.Embed(colour=discord.Colour.orange())
         if not items:
-            embed.description = "✅ Nothing flagged. All their invites look clean."
+            embed.description = head + f"{E('me_respect', '✅')} Nothing flagged. All their invites look clean."
         else:
-            lines = [f"<@{j['m']}> · {ts(j['t'], 'd')}\n└ " + " · ".join(FLAG_TEXT[f] for f in j["flags"])
+            lines = [f"<@{j['m']}> · {ts(j['t'], 'd')}\n" + "\n".join(f"> {flag_text(f)}" for f in j["flags"])
                      for j in reversed(items[-15:])]
-            embed.description = "\n".join(lines)
+            embed.description = head + "\n".join(lines)
             embed.set_footer(text=f"{len(items)} flagged • rejoins, alts and self-invites don't count")
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
@@ -1863,7 +1880,8 @@ class InvitesView(discord.ui.View):
 @app_commands.describe(user="Whose invites (default: you)")
 async def invites_cmd(interaction: discord.Interaction, user: discord.User = None) -> None:
     user = user or interaction.user
-    await interaction.response.send_message(embed=invites_embed(user), view=InvitesView(user))
+    await interaction.response.send_message(embed=invites_embed(user), view=InvitesView(user),
+                                            allowed_mentions=discord.AllowedMentions.none())
 
 
 leaderboard_group = app_commands.Group(name="leaderboard", description="Leaderboards")
@@ -1876,18 +1894,21 @@ async def leaderboard_invites(interaction: discord.Interaction) -> None:
     for i, (uid, c) in enumerate(board[:10], start=1):
         lines.append(f"`{i:>2}.` <@{uid}> • **{c['total']}** invites. "
                      f"({c['regular']} regular, {c['left']} left, {c['fake']} fake, {c['bonus']} bonus)")
-    embed = discord.Embed(title=f"{E('ticket', '📨')} Invites Leaderboard", colour=COLOUR)
-    embed.description = "\n".join(lines) if lines else "Nobody has any invites yet."
     me = next(((i + 1, c) for i, (uid, c) in enumerate(board) if uid == interaction.user.id), None)
     you = f"#{me[0]} of {len(board)} — **{me[1]['total']}** invites" if me else "Not ranked yet — **0** invites"
-    embed.add_field(name="📊 You", value=you, inline=False)
-    embed.add_field(
-        name="📌 You must use your own invite link",
-        value=("Right-click the server → **Invite People** → **Edit invite link** → set **Expire after: Never** "
-               "and **Max uses: No limit**, then share that link. Only joins through a link *you* made count "
-               "towards *your* total.\n-# ❌ Doesn't count: anyone who leaves · anyone who's been in the server "
-               f"before (rejoins) · accounts under {ALT_DAYS} days old · inviting yourself"),
-        inline=False,
+    embed = discord.Embed(
+        description=(
+            f"### {E('me_trophy', '🏆')} Invites Leaderboard\n"
+            + ("\n".join(lines) if lines else "Nobody has any invites yet.")
+            + f"\n\n{E('me_chart', '📊')} **You:** {you}\n\n"
+            f"{E('me_rules', '📌')} **You must use your own invite link**\n"
+            "Right-click the server → **Invite People** → **Edit invite link** → set **Expire after: Never** "
+            "and **Max uses: No limit**, then share that link. Only joins through a link *you* made count "
+            "towards *your* total.\n"
+            f"-# {E('me_no', '❌')} Doesn't count: anyone who leaves · anyone who's been in the server before "
+            f"(rejoins) · accounts under {ALT_DAYS} days old · inviting yourself"
+        ),
+        colour=COLOUR,
     )
     await interaction.response.send_message(embed=embed, allowed_mentions=discord.AllowedMentions.none())
 
