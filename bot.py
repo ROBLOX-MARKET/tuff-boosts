@@ -218,6 +218,7 @@ class MEBot(commands.Bot):
         self.add_view(TicketPanelView())
         self.add_view(TicketControlsView())
         self.add_view(GiveawayView())
+        self.add_view(PingRolesView())
         self.tree.add_command(embed_group)
         self.tree.add_command(giveaway_group)
         self.tree.add_command(joinping_group)
@@ -250,6 +251,7 @@ class MEBot(commands.Bot):
             store.save()
         await upload_chrome_emojis()
         await set_avatar()
+        await post_roles_panel_once()
 
     async def log_to(self, channel_id: int | None, embed: discord.Embed, file: discord.File | None = None) -> None:
         if not channel_id:
@@ -1949,6 +1951,109 @@ async def invite_bonus(interaction: discord.Interaction, user: discord.User, amo
     store.save()
     await reply(interaction, f"🎁 {user.mention} now has **{bonus[str(user.id)]}** bonus invites "
                              f"(**{invite_counts(user.id)['total']}** total).")
+
+
+
+# ===========================================================================
+# Ping roles panel (click to add / remove)
+# ===========================================================================
+
+ROLES_CHANNEL_ID = 1570045204570837082
+
+# key: (role name in your server, emoji name, fallback emoji, what it's for)
+PING_ROLES = {
+    "announce": ("Announcement Ping", "me_announce", "📢", "Big news, server updates and anything important."),
+    "restock": ("Restock Ping", "me_restock", "🔄", "The moment products are back in stock, so you never miss out."),
+    "giveaway": ("Giveaway Ping", "me_giveaway", "🎁", "Every new giveaway, so you can enter before it ends."),
+    "offers": ("Special Offers Ping", "me_offers", "🏷️", "Discounts, deals and limited-time offers."),
+}
+
+
+def find_role(guild: discord.Guild, name: str) -> discord.Role | None:
+    return discord.utils.find(lambda r: r.name.lower() == name.lower(), guild.roles)
+
+
+def roles_embed() -> discord.Embed:
+    lines = [
+        f"### {E('me_announce', '📢')} Notification Roles",
+        "We don't ping everyone for everything. Pick the pings **you** actually want, "
+        "so you only get notified about the stuff you care about.",
+        "",
+    ]
+    for name, emoji, fallback, why in PING_ROLES.values():
+        lines.append(f"{E(emoji, fallback)} **{name}**\n> {why}")
+    lines += ["", f"{E('me_arrow', '➜')} **Click a button below to add a role. Click it again to remove it.**"]
+    embed = discord.Embed(description="\n".join(lines), colour=COLOUR)
+    embed.set_footer(text=f"{STORE_NAME} • You can change these any time")
+    return embed
+
+
+class PingRoleButton(discord.ui.Button):
+    def __init__(self, key: str):
+        name, emoji, fallback, _ = PING_ROLES[key]
+        super().__init__(label=name.replace(" Ping", ""), emoji=server_emoji(emoji, fallback),
+                         style=discord.ButtonStyle.secondary, custom_id=f"me:pingrole:{key}")
+        self.key = key
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        name = PING_ROLES[self.key][0]
+        role = find_role(interaction.guild, name)
+        if role is None:
+            return await reply(interaction, f"{E('me_no', '❌')} I can't find a role called **{name}**. Please tell an admin.")
+        member = interaction.user
+        try:
+            if role in member.roles:
+                await member.remove_roles(role, reason="Ping role panel")
+                await reply(interaction, f"{E('me_door', '➖')} Removed {role.mention}. You won't get these pings any more.")
+            else:
+                await member.add_roles(role, reason="Ping role panel")
+                await reply(interaction, f"{E('me_respect', '✅')} Added {role.mention}. You'll now get these pings.")
+        except discord.Forbidden:
+            await reply(interaction, f"{E('me_no', '❌')} I can't give that role. My role needs to be above **{name}** in Server Settings → Roles.")
+
+
+class PingRolesView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+        for key in PING_ROLES:
+            self.add_item(PingRoleButton(key))
+
+
+async def send_roles_panel(channel: discord.abc.Messageable) -> discord.Message:
+    message = await channel.send(embed=roles_embed(), view=PingRolesView())
+    store.data["roles_panel"] = {"channel": channel.id, "message": message.id}
+    store.save()
+    return message
+
+
+async def post_roles_panel_once() -> None:
+    """Posts the panel in the roles channel the first time, and never again unless it's deleted."""
+    saved = store.data.get("roles_panel")
+    channel = bot.get_channel(ROLES_CHANNEL_ID)
+    if channel is None:
+        return
+    if saved:
+        try:
+            await bot.get_channel(saved["channel"]).fetch_message(saved["message"])
+            return
+        except (discord.NotFound, AttributeError):
+            pass
+        except discord.HTTPException:
+            return
+    try:
+        await send_roles_panel(channel)
+        log.info("Posted the ping roles panel")
+    except discord.HTTPException:
+        log.exception("Couldn't post the ping roles panel.")
+
+
+@bot.tree.command(name="rolespanel", description="🔔 Post the ping roles panel in this channel (admin)")
+@app_commands.default_permissions(administrator=True)
+@admin_only()
+async def roles_panel_cmd(interaction: discord.Interaction) -> None:
+    await interaction.response.defer(ephemeral=True)
+    await send_roles_panel(interaction.channel)
+    await interaction.followup.send("✅ Ping roles panel posted.", ephemeral=True)
 
 
 # ===========================================================================
