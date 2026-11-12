@@ -1407,6 +1407,7 @@ SETUP_LABELS = {
     "ticket_category": ("📂 Ticket category", "#"),
     "staff_role": ("🛡️ Staff role", "@&"),
     "auto_role": ("🎭 Auto role", "@&"),
+    "vouch_channel": ("⭐ Vouch channel", "#"),
 }
 
 
@@ -1422,6 +1423,7 @@ SETUP_LABELS = {
     ticket_category="Category new tickets are made in",
     staff_role="Role that can see and handle tickets (admins always can)",
     auto_role="Role new members get automatically",
+    vouch_channel="Where /vouch posts go (otherwise the channel it's used in)",
 )
 async def setup(
     interaction: discord.Interaction,
@@ -1433,13 +1435,14 @@ async def setup(
     ticket_category: discord.CategoryChannel = None,
     staff_role: discord.Role = None,
     auto_role: discord.Role = None,
+    vouch_channel: discord.TextChannel = None,
 ) -> None:
     config = store.data.setdefault("config", {})
     for name, value in (
         ("welcome_channel", welcome_channel), ("mod_log_channel", mod_log_channel),
         ("transcript_channel", transcript_channel), ("sales_channel", sales_channel),
         ("rules_channel", rules_channel), ("ticket_category", ticket_category),
-        ("staff_role", staff_role), ("auto_role", auto_role),
+        ("staff_role", staff_role), ("auto_role", auto_role), ("vouch_channel", vouch_channel),
     ):
         if value is not None:
             config[name] = value.id
@@ -1535,6 +1538,135 @@ async def autorole_list(interaction: discord.Interaction) -> None:
         ids.append(cfg("auto_role"))
     text = "\n".join(f"🎭 <@&{r}>" for r in ids) or "No auto roles yet. Use `/autorole add`."
     await reply(interaction, embed=discord.Embed(title="🎭 Auto roles", description=text, colour=COLOUR))
+
+
+
+# ===========================================================================
+# Vouches
+# ===========================================================================
+
+STAR = "⭐"
+PER_PAGE = 5
+
+
+def stars(n: int) -> str:
+    return STAR * n + "☆" * (5 - n)
+
+
+def vouches_for(user_id: int) -> list[dict]:
+    return [v for v in store.data.setdefault("vouches", []) if v["for"] == user_id]
+
+
+@bot.tree.command(name="vouch", description="⭐ Vouch for someone you bought from")
+@app_commands.describe(
+    user="Who you're vouching for",
+    product="What you bought",
+    price="How much you paid, e.g. £10",
+    rating="Your rating out of 5",
+    comment="Anything else to say (optional)",
+)
+@app_commands.choices(rating=[app_commands.Choice(name=f"{stars(i)}  {i}/5", value=i) for i in range(5, 0, -1)])
+@app_commands.checks.cooldown(1, 30)
+async def vouch_cmd(
+    interaction: discord.Interaction,
+    user: discord.Member,
+    product: app_commands.Range[str, 1, 150],
+    price: app_commands.Range[str, 1, 50],
+    rating: app_commands.Choice[int],
+    comment: app_commands.Range[str, 1, 500] = None,
+) -> None:
+    if user.id == interaction.user.id:
+        return await reply(interaction, "❌ You can't vouch for yourself.")
+    if user.bot:
+        return await reply(interaction, "❌ You can't vouch for a bot.")
+
+    store.data.setdefault("vouches", [])
+    number = store.data.get("vouch_count", 0) + 1
+    store.data["vouch_count"] = number
+    when = now()
+    store.data["vouches"].append({
+        "id": number, "for": user.id, "by": interaction.user.id, "product": product,
+        "price": price, "rating": rating.value, "comment": comment, "time": when.timestamp(),
+    })
+    store.save()
+
+    embed = discord.Embed(title="New vouch created!", description=stars(rating.value), colour=COLOUR, timestamp=when)
+    embed.set_thumbnail(url=user.display_avatar.url)
+    embed.add_field(name="Vouched for:", value=user.mention, inline=True)
+    embed.add_field(name="Vouched by:", value=interaction.user.mention, inline=True)
+    embed.add_field(name="Vouch Nº:", value=str(number), inline=True)
+    embed.add_field(name="Product:", value=product, inline=True)
+    embed.add_field(name="Paid:", value=price, inline=True)
+    embed.add_field(name="Vouched at:", value=ts(when, "f"), inline=True)
+    if comment:
+        embed.add_field(name="Comment:", value=comment, inline=False)
+    total = len(vouches_for(user.id))
+    icon = interaction.guild.icon.url if interaction.guild.icon else None
+    embed.set_footer(text=f"{user.display_name} now has {total} vouch{'es' if total != 1 else ''} • {STORE_NAME}", icon_url=icon)
+
+    target = bot.get_channel(cfg("vouch_channel")) if cfg("vouch_channel") else None
+    if target is None or target.id == interaction.channel.id:
+        await interaction.response.send_message(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+    else:
+        await target.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+        await reply(interaction, f"⭐ Thanks! Your vouch was posted in {target.mention}.")
+
+
+def vouches_page(user: discord.abc.User, page: int) -> tuple[discord.Embed, int]:
+    items = list(reversed(vouches_for(user.id)))
+    pages = max(1, (len(items) + PER_PAGE - 1) // PER_PAGE)
+    page = max(0, min(page, pages - 1))
+    embed = discord.Embed(title=f"⭐ {user.display_name}'s vouches", colour=COLOUR)
+    embed.set_thumbnail(url=user.display_avatar.url)
+    if not items:
+        embed.description = "No vouches yet."
+        return embed, 1
+    avg = sum(v["rating"] for v in items) / len(items)
+    embed.description = f"**{len(items)}** vouch{'es' if len(items) != 1 else ''} • average **{avg:.1f}/5** {STAR}"
+    for v in items[page * PER_PAGE:(page + 1) * PER_PAGE]:
+        lines = [f"{stars(v['rating'])}", f"📦 {v['product']} • 💵 {v['price']}", f"👤 by <@{v['by']}> • {ts(v['time'], 'R')}"]
+        if v.get("comment"):
+            lines.append(f"💬 {clip(v['comment'], 150)}")
+        embed.add_field(name=f"Vouch Nº {v['id']}", value="\n".join(lines), inline=False)
+    embed.set_footer(text=f"Page {page + 1} of {pages}")
+    return embed, pages
+
+
+class VouchPages(discord.ui.View):
+    def __init__(self, user: discord.abc.User, viewer_id: int):
+        super().__init__(timeout=300)
+        self.user = user
+        self.viewer_id = viewer_id
+        self.page = 0
+        self.sync()
+
+    def sync(self) -> None:
+        _, pages = vouches_page(self.user, self.page)
+        self.prev.disabled = self.page <= 0
+        self.next.disabled = self.page >= pages - 1
+
+    async def show(self, interaction: discord.Interaction) -> None:
+        self.sync()
+        embed, _ = vouches_page(self.user, self.page)
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    @discord.ui.button(emoji="◀️", style=discord.ButtonStyle.secondary)
+    async def prev(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        self.page -= 1
+        await self.show(interaction)
+
+    @discord.ui.button(emoji="▶️", style=discord.ButtonStyle.secondary)
+    async def next(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        self.page += 1
+        await self.show(interaction)
+
+
+@bot.tree.command(name="vouches", description="🔎 See all of someone's vouches (only you can see it)")
+@app_commands.describe(user="Whose vouches to look up")
+async def vouches_cmd(interaction: discord.Interaction, user: discord.User) -> None:
+    embed, pages = vouches_page(user, 0)
+    view = VouchPages(user, interaction.user.id) if pages > 1 else discord.utils.MISSING
+    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
 
 # ===========================================================================
