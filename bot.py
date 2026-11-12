@@ -221,6 +221,7 @@ class MEBot(commands.Bot):
         self.tree.add_command(giveaway_group)
         self.tree.add_command(joinping_group)
         self.tree.add_command(autorole_group)
+        self.tree.add_command(leaderboard_group)
         guild = discord.Object(id=GUILD_ID)
         self.tree.copy_global_to(guild=guild)
         try:
@@ -238,6 +239,14 @@ class MEBot(commands.Bot):
         for guild in list(self.guilds):
             await leave_if_not_ours(guild)
         await cache_invites()
+        # Remember everyone already here, so if they leave and come back it's caught as a rejoin.
+        guild = self.get_guild(GUILD_ID)
+        if guild is not None:
+            seen = store.data.setdefault("seen", {})
+            stamp = now().timestamp()
+            for member in guild.members:
+                seen.setdefault(str(member.id), stamp)
+            store.save()
         await upload_chrome_emojis()
         await set_avatar()
 
@@ -1275,11 +1284,13 @@ async def on_invite_delete(invite: discord.Invite) -> None:
 async def find_inviter(guild: discord.Guild) -> tuple[discord.abc.User | None, str]:
     """Return (inviter, how) where how is 'invite', 'vanity' or 'unknown'."""
     inviter = None
+    bot.last_invite_code = None
     try:
         current = await guild.invites()
         for inv in current:
             if (inv.uses or 0) > bot.invite_cache.get(inv.code, 0):
                 inviter = inv.inviter
+                bot.last_invite_code = inv.code
                 break
         bot.invite_cache = {i.code: i.uses or 0 for i in current}
     except discord.Forbidden:
@@ -1299,11 +1310,10 @@ async def on_member_join(member: discord.Member) -> None:
     if member.guild.id != GUILD_ID:
         return
     inviter, how = await find_inviter(member.guild)
-    if inviter and inviter.id != member.id:
-        key = str(inviter.id)
-        store.data["invites"][key] = store.data["invites"].get(key, 0) + 1
-        store.data["invited_by"][str(member.id)] = inviter.id
-        store.save()
+    if inviter is not None and not member.bot:
+        await record_join(member, inviter, getattr(bot, "last_invite_code", None))
+    store.data.setdefault("seen", {})[str(member.id)] = now().timestamp()
+    store.save()
 
     if not member.bot:
         role_ids = set(store.data.get("config", {}).get("auto_roles", []))
@@ -1346,7 +1356,7 @@ def ordinal(n: int) -> str:
 async def send_welcome(channel: discord.abc.Messageable, member: discord.Member, inviter, how: str, test: bool = False) -> None:
     guild = member.guild
     if how == "invite" and inviter is not None:
-        joined = f"{E('ticket', '📨')} Invited by {inviter.mention} (**{store.data['invites'].get(str(inviter.id), 0)}** invites)"
+        joined = f"{E('ticket', '📨')} Invited by {inviter.mention} (**{invite_counts(inviter.id)['total']}** invites)"
     elif how == "vanity":
         code = guild.vanity_url_code
         joined = f"{E('ticket', '🔗')} Joined through the server vanity link" + (f" (discord.gg/{code})" if code else "")
@@ -1389,11 +1399,11 @@ async def send_welcome(channel: discord.abc.Messageable, member: discord.Member,
 
 @bot.event
 async def on_member_remove(member: discord.Member) -> None:
-    inviter_id = store.data["invited_by"].pop(str(member.id), None)
-    if inviter_id is not None:
-        key = str(inviter_id)
-        store.data["invites"][key] = max(0, store.data["invites"].get(key, 0) - 1)
-        store.save()
+    for join in reversed(store.data.setdefault("joins", [])):
+        if join["m"] == member.id and not join.get("left"):
+            join["left"] = now().timestamp()
+            store.save()
+            break
 
 
 @bot.event
@@ -1404,18 +1414,6 @@ async def on_message(message: discord.Message) -> None:
     store.data["messages"][key] = store.data["messages"].get(key, 0) + 1
     store.dirty = True
     await bot.process_commands(message)
-
-
-@bot.tree.command(name="invites", description="📨 See how many people someone has invited")
-async def invites(interaction: discord.Interaction, user: discord.User = None) -> None:
-    user = user or interaction.user
-    count = store.data["invites"].get(str(user.id), 0)
-    msgs = store.data["messages"].get(str(user.id), 0)
-    embed = discord.Embed(colour=COLOUR)
-    embed.set_author(name=str(user), icon_url=user.display_avatar.url)
-    embed.add_field(name="📨 Invites", value=f"**{count}**", inline=True)
-    embed.add_field(name="💬 Messages", value=f"**{msgs:,}**", inline=True)
-    await reply(interaction, embed=embed, ephemeral=False)
 
 
 @bot.tree.command(name="welcometest", description="👋 Preview the welcome message on yourself (admin)")
@@ -1705,6 +1703,224 @@ async def vouches_cmd(interaction: discord.Interaction, user: discord.User) -> N
     await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
 
+
+# ===========================================================================
+# Invite tracking: counts, leaderboard, history and staff-only flags
+# ===========================================================================
+
+ALT_DAYS = 3          # accounts younger than this count as fake
+NEW_ACCOUNT_DAYS = 14  # younger than this gets a warning flag (still counts)
+
+
+def joins() -> list[dict]:
+    return store.data.setdefault("joins", [])
+
+
+def reset_time(user_id: int) -> float:
+    per_user = store.data.setdefault("invite_resets", {}).get(str(user_id), 0)
+    return max(store.data.get("invite_reset_all", 0), per_user)
+
+
+def current_joins(user_id: int) -> list[dict]:
+    since = reset_time(user_id)
+    return [j for j in joins() if j["inv"] == user_id and j["t"] >= since]
+
+
+def invite_counts(user_id: int) -> dict:
+    items = current_joins(user_id)
+    regular = len(items)
+    fake = sum(1 for j in items if j.get("fake"))
+    left = sum(1 for j in items if j.get("left") and not j.get("fake"))
+    bonus = store.data.setdefault("invite_bonus", {}).get(str(user_id), 0)
+    return {"regular": regular, "left": left, "fake": fake, "bonus": bonus,
+            "total": max(0, regular - left - fake + bonus)}
+
+
+def leaderboard() -> list[tuple[int, dict]]:
+    ids = {j["inv"] for j in joins()} | {int(k) for k in store.data.setdefault("invite_bonus", {})}
+    rows = [(uid, invite_counts(uid)) for uid in ids]
+    rows = [r for r in rows if r[1]["total"] > 0 or r[1]["regular"] > 0]
+    rows.sort(key=lambda r: (-r[1]["total"], -r[1]["regular"]))
+    return rows
+
+
+def mask(code: str | None) -> str:
+    return f"`{code[:5]}***`" if code else "`unknown`"
+
+
+FLAG_TEXT = {
+    "rejoin": "🔁 Rejoin (was in the server before)",
+    "alt": f"👤 Possible alt (account under {ALT_DAYS} days old)",
+    "new": f"🆕 New account (under {NEW_ACCOUNT_DAYS} days old)",
+    "self": "🪞 Used their own invite",
+}
+
+
+async def record_join(member: discord.Member, inviter: discord.abc.User, code: str | None) -> None:
+    age_days = (now() - member.created_at).total_seconds() / 86400
+    flags = []
+    if str(member.id) in store.data.setdefault("seen", {}) or any(j["m"] == member.id for j in joins()):
+        flags.append("rejoin")
+    if age_days < ALT_DAYS:
+        flags.append("alt")
+    elif age_days < NEW_ACCOUNT_DAYS:
+        flags.append("new")
+    if inviter.id == member.id:
+        flags.append("self")
+    fake = any(f in flags for f in ("rejoin", "alt", "self"))
+    joins().append({"m": member.id, "inv": inviter.id, "code": code, "t": now().timestamp(),
+                    "flags": flags, "fake": fake, "left": None})
+    store.save()
+
+    if flags:
+        # Staff only: goes to the mod log, nobody gets pinged.
+        embed = discord.Embed(title="🚩 Flagged invite", colour=discord.Colour.orange(), timestamp=now())
+        embed.set_thumbnail(url=member.display_avatar.url)
+        embed.add_field(name="👤 Joined", value=f"{member.mention}\n`{member.id}`", inline=True)
+        embed.add_field(name="📨 Invited by", value=f"{inviter.mention}\n`{inviter.id}`", inline=True)
+        embed.add_field(name="📅 Account made", value=ts(member.created_at, "R"), inline=True)
+        embed.add_field(name="🚩 Why", value="\n".join(FLAG_TEXT[f] for f in flags), inline=False)
+        embed.set_footer(text="Doesn't count towards their invites" if fake else "Still counts, just a heads-up")
+        await bot.log_to(cfg("mod_log_channel"), embed)
+
+
+def invites_embed(user: discord.abc.User) -> discord.Embed:
+    c = invite_counts(user.id)
+    embed = discord.Embed(
+        title=user.display_name,
+        description=(f"You currently have **{c['total']}** invites. "
+                     f"(**{c['regular']}** regular, **{c['left']}** left, **{c['fake']}** fake, **{c['bonus']}** bonus)"),
+        colour=COLOUR,
+    )
+    embed.set_thumbnail(url=user.display_avatar.url)
+    items = list(reversed(current_joins(user.id)))
+    lines = []
+    for j in items[:10]:
+        status = " · 👋 left" if j.get("left") else ""
+        lines.append(f"<@{j['m']}> — {mask(j.get('code'))} · {ts(j['t'], 'R')}{status}")
+    if lines:
+        more = f"\n*…and {len(items) - 10} more*" if len(items) > 10 else ""
+        embed.add_field(name="👥 Who they invited", value="\n".join(lines) + more, inline=False)
+    else:
+        embed.add_field(name="👥 Who they invited", value="Nobody yet.", inline=False)
+    board = leaderboard()
+    rank = next((i + 1 for i, (uid, _) in enumerate(board) if uid == user.id), None)
+    footer = f"Ranked #{rank} on /leaderboard invites" if rank else "Not on /leaderboard invites yet"
+    if c["left"]:
+        footer += f"\n{c['left']} left the server — rejoining doesn't give the invite back"
+    embed.set_footer(text=footer)
+    return embed
+
+
+class InvitesView(discord.ui.View):
+    def __init__(self, user: discord.abc.User):
+        super().__init__(timeout=900)
+        self.user = user
+
+    @discord.ui.button(label="Past invites", emoji="📜", style=discord.ButtonStyle.secondary)
+    async def past(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        items = [j for j in joins() if j["inv"] == self.user.id]
+        since = reset_time(self.user.id)
+        embed = discord.Embed(title=f"📜 {self.user.display_name}'s invite history", colour=COLOUR)
+        if not items:
+            embed.description = "No invites on record."
+        else:
+            show_flags = isinstance(interaction.user, discord.Member) and is_staff(interaction.user)
+            lines = []
+            for j in reversed(items[-25:]):
+                bits = [f"<@{j['m']}>", ts(j["t"], "d")]
+                if j["t"] < since:
+                    bits.append("🗑️ before reset")
+                if j.get("left"):
+                    bits.append("👋 left")
+                if show_flags and j.get("flags"):
+                    bits.append("🚩 " + ", ".join(FLAG_TEXT[f].split(" (")[0] for f in j["flags"]))
+                lines.append(" · ".join(bits))
+            embed.description = f"All **{len(items)}** people they've ever invited (latest 25):\n\n" + "\n".join(lines)
+            rejoins = sum(1 for j in items if "rejoin" in j.get("flags", []))
+            if show_flags:
+                embed.set_footer(text=f"Staff view • {rejoins} rejoin(s) on record")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @discord.ui.button(label="Flags", emoji="🚩", style=discord.ButtonStyle.danger)
+    async def flags(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        if not (isinstance(interaction.user, discord.Member) and is_staff(interaction.user)):
+            return await interaction.response.send_message("❌ Only staff can see flags.", ephemeral=True)
+        items = [j for j in joins() if j["inv"] == self.user.id and j.get("flags")]
+        embed = discord.Embed(title=f"🚩 Flagged invites for {self.user.display_name}", colour=discord.Colour.orange())
+        if not items:
+            embed.description = "✅ Nothing flagged. All their invites look clean."
+        else:
+            lines = [f"<@{j['m']}> · {ts(j['t'], 'd')}\n└ " + " · ".join(FLAG_TEXT[f] for f in j["flags"])
+                     for j in reversed(items[-15:])]
+            embed.description = "\n".join(lines)
+            embed.set_footer(text=f"{len(items)} flagged • rejoins, alts and self-invites don't count")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(name="invites", description="📨 See someone's invites and who they invited")
+@app_commands.describe(user="Whose invites (default: you)")
+async def invites_cmd(interaction: discord.Interaction, user: discord.User = None) -> None:
+    user = user or interaction.user
+    await interaction.response.send_message(embed=invites_embed(user), view=InvitesView(user))
+
+
+leaderboard_group = app_commands.Group(name="leaderboard", description="Leaderboards")
+
+
+@leaderboard_group.command(name="invites", description="📨 Top inviters")
+async def leaderboard_invites(interaction: discord.Interaction) -> None:
+    board = leaderboard()
+    lines = []
+    for i, (uid, c) in enumerate(board[:10], start=1):
+        lines.append(f"`{i:>2}.` <@{uid}> • **{c['total']}** invites. "
+                     f"({c['regular']} regular, {c['left']} left, {c['fake']} fake, {c['bonus']} bonus)")
+    embed = discord.Embed(title=f"{E('ticket', '📨')} Invites Leaderboard", colour=COLOUR)
+    embed.description = "\n".join(lines) if lines else "Nobody has any invites yet."
+    me = next(((i + 1, c) for i, (uid, c) in enumerate(board) if uid == interaction.user.id), None)
+    you = f"#{me[0]} of {len(board)} — **{me[1]['total']}** invites" if me else "Not ranked yet — **0** invites"
+    embed.add_field(name="📊 You", value=you, inline=False)
+    embed.add_field(
+        name="📌 You must use your own invite link",
+        value=("Right-click the server → **Invite People** → **Edit invite link** → set **Expire after: Never** "
+               "and **Max uses: No limit**, then share that link. Only joins through a link *you* made count "
+               "towards *your* total.\n-# ❌ Doesn't count: anyone who leaves · anyone who's been in the server "
+               f"before (rejoins) · accounts under {ALT_DAYS} days old · inviting yourself"),
+        inline=False,
+    )
+    await interaction.response.send_message(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+
+
+@bot.tree.command(name="invitesreset", description="🧹 Reset invites (everyone, or one person) (admin)")
+@app_commands.default_permissions(administrator=True)
+@admin_only()
+@app_commands.describe(user="Only reset this person (leave empty to reset everyone)")
+async def invites_reset(interaction: discord.Interaction, user: discord.User = None) -> None:
+    stamp = now().timestamp()
+    if user:
+        store.data.setdefault("invite_resets", {})[str(user.id)] = stamp
+        store.data.setdefault("invite_bonus", {}).pop(str(user.id), None)
+        text = f"🧹 Reset {user.mention}'s invites to 0. Their old invites are still in **Past invites**."
+    else:
+        store.data["invite_reset_all"] = stamp
+        store.data["invite_bonus"] = {}
+        text = "🧹 Everyone's invites are reset to 0. Old invites are still in **Past invites**, and rejoins are still caught."
+    store.save()
+    await reply(interaction, text)
+
+
+@bot.tree.command(name="invitebonus", description="🎁 Add or remove bonus invites (admin)")
+@app_commands.default_permissions(administrator=True)
+@admin_only()
+@app_commands.describe(user="Who", amount="How many to add (use a minus number to take away)")
+async def invite_bonus(interaction: discord.Interaction, user: discord.User, amount: app_commands.Range[int, -1000, 1000]) -> None:
+    bonus = store.data.setdefault("invite_bonus", {})
+    bonus[str(user.id)] = bonus.get(str(user.id), 0) + amount
+    store.save()
+    await reply(interaction, f"🎁 {user.mention} now has **{bonus[str(user.id)]}** bonus invites "
+                             f"(**{invite_counts(user.id)['total']}** total).")
+
+
 # ===========================================================================
 # /embed create
 # ===========================================================================
@@ -1839,7 +2055,7 @@ class GiveawayView(discord.ui.View):
             missing = []
             if gw.get("required_role") and gw["required_role"] not in role_ids:
                 missing.append(f"🎭 You need the <@&{gw['required_role']}> role.")
-            invites_now = store.data["invites"].get(uid, 0)
+            invites_now = invite_counts(int(uid))["total"]
             if gw.get("min_invites") and invites_now < gw["min_invites"]:
                 missing.append(f"📨 You need **{gw['min_invites']}** invites (you have **{invites_now}**).")
             msgs_now = store.data["messages"].get(uid, 0)
