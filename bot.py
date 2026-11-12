@@ -860,17 +860,25 @@ async def set_avatar() -> None:
 
 
 async def upload_chrome_emojis() -> None:
-    """Add any emoji from the emojis/ folder that the server doesn't have yet."""
+    """Add or update the server's emojis from the emojis/ folder (replaces any that changed)."""
+    import hashlib
     guild = bot.get_guild(GUILD_ID)
     if guild is None or not EMOJI_DIR.exists():
         return
-    have = {e.name.lower() for e in guild.emojis}
+    hashes = store.data.setdefault("emoji_hashes", {})
     for path in sorted([*EMOJI_DIR.glob("*.png"), *EMOJI_DIR.glob("*.gif")]):
-        if path.stem.lower() in have:
+        data = path.read_bytes()
+        digest = hashlib.sha256(data).hexdigest()
+        existing = [e for e in guild.emojis if e.name.lower() == path.stem.lower()]
+        if existing and hashes.get(path.stem) == digest:
             continue
         try:
-            await guild.create_custom_emoji(name=path.stem, image=path.read_bytes(), reason="M&E chrome emoji set")
-            log.info("Added emoji %s", path.stem)
+            for old in existing:
+                await old.delete(reason="Replaced with the new version")
+            await guild.create_custom_emoji(name=path.stem, image=data, reason="M&E emoji set")
+            hashes[path.stem] = digest
+            store.save()
+            log.info("%s emoji %s", "Updated" if existing else "Added", path.stem)
         except discord.HTTPException as exc:
             log.error("Couldn't add emoji %s: %s", path.stem, exc)
             if exc.code == 30008:  # emoji slots full
