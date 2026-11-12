@@ -55,7 +55,7 @@ GUILD_ID = id_setting("GUILD_ID", required=True)
 # Channels and roles are set inside Discord with /setup. These .env names still work as a fallback.
 ENV_IDS = {
     "staff_role": id_setting("STAFF_ROLE_ID"),
-    "ticket_category": id_setting("TICKET_CATEGORY_ID"),
+    "ticket_category": id_setting("TICKET_CATEGORY_ID") or 1570362185182482462,
     "transcript_channel": id_setting("TRANSCRIPT_CHANNEL_ID"),
     "mod_log_channel": id_setting("MOD_LOG_CHANNEL_ID"),
     "sales_channel": id_setting("SALES_CHANNEL_ID"),
