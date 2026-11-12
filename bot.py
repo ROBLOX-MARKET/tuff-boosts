@@ -220,6 +220,8 @@ class MEBot(commands.Bot):
         self.add_view(GiveawayView())
         self.add_view(PingRolesView())
         self.add_view(LegitView())
+        self.add_view(TosView())
+        self.add_view(TagCheckView())
         self.tree.add_command(embed_group)
         self.tree.add_command(giveaway_group)
         self.tree.add_command(joinping_group)
@@ -254,6 +256,8 @@ class MEBot(commands.Bot):
         await set_avatar()
         await post_roles_panel_once()
         await post_legit_panel_once()
+        await post_tos_once()
+        self.loop.create_task(tag_sync_loop())
 
     async def log_to(self, channel_id: int | None, embed: discord.Embed, file: discord.File | None = None) -> None:
         if not channel_id:
@@ -2264,6 +2268,201 @@ async def legit_panel_cmd(interaction: discord.Interaction) -> None:
     await interaction.followup.send("✅ Legit panel posted.", ephemeral=True)
 
 
+
+# ===========================================================================
+# Terms of Service post + Server Tag guide (3x giveaway entries + role)
+# ===========================================================================
+
+TOS_CHANNEL_ID = 1570046029863067768
+TAG_ROLE_ID = 1570497145524592700
+
+
+def tos_embed() -> discord.Embed:
+    b = "`✦`"
+    text = (
+        f"# {E('me_rules', '📜')} {STORE_NAME} — Terms of Service\n"
+        f"> Placing an order with **{STORE_NAME}** means you've read and agree to everything below.\n\n"
+        f"### {E('me_users', '🤝')} Using Our Services\n"
+        f"> {b} Stick to Discord's [Terms of Service](https://discord.com/terms) at all times.\n"
+        f"> {b} Be respectful to staff and other customers — no abuse, spam or time-wasting.\n"
+        f"> {b} Every order goes through a ticket. We don't take orders in DMs.\n"
+        f"> {b} Double-check what you're buying and the price before you pay.\n\n"
+        f"### {E('me_bank', '💳')} Payments\n"
+        f"> {b} Full payment is required before we start your order.\n"
+        f"> {b} Only use the payment methods we give you in your ticket.\n"
+        f"> {b} Chargebacks or payment disputes = an instant, permanent ban.\n\n"
+        f"### {E('me_buy', '📦')} Delivery\n"
+        f"> {b} Most orders are delivered quickly, but times can vary depending on stock and demand.\n"
+        f"> {b} Make sure the details you give us (server link, username etc.) are correct — we're not responsible for mistakes on your end.\n\n"
+        f"### {E('me_restock', '🔁')} Refunds & Replacements\n"
+        f"> {b} **No refunds once your order has been started or delivered.**\n"
+        f"> {b} If something goes wrong on our side, we'll fix or replace it — just open a ticket.\n"
+        f"> {b} Issues must be reported within **48 hours** of delivery to be covered.\n\n"
+        f"### {E('me_no', '⚠️')} Good to Know\n"
+        f"> {b} We can refuse or cancel any order, at any time, for any reason.\n"
+        f"> {b} These terms can change without notice — it's on you to stay up to date.\n"
+        f"> {b} Buying from us means you accept these terms, whether you've read them or not.\n\n"
+        f"{E('me_servertag', '🏷️')} **Wear our server tag** for **3x giveaway entries** and an exclusive role. Click below to see how!"
+    )
+    embed = discord.Embed(description=text, colour=COLOUR)
+    embed.set_footer(text=f"{STORE_NAME} • Last updated")
+    embed.timestamp = now()
+    return embed
+
+
+def wears_tag(user: discord.abc.User) -> bool:
+    pg = getattr(user, "primary_guild", None)
+    if pg is None:
+        return False
+    return getattr(pg, "id", None) == GUILD_ID and getattr(pg, "identity_enabled", True) is not False
+
+
+async def sync_tag_role(member: discord.Member, wearing: bool | None = None) -> bool:
+    role = member.guild.get_role(TAG_ROLE_ID)
+    if role is None or member.bot:
+        return False
+    if wearing is None:
+        wearing = wears_tag(member)
+    try:
+        if wearing and role not in member.roles:
+            await member.add_roles(role, reason="Wearing the server tag")
+        elif not wearing and role in member.roles:
+            await member.remove_roles(role, reason="Stopped wearing the server tag")
+    except discord.HTTPException:
+        log.exception("Couldn't update the server tag role for %s", member.id)
+    return wearing
+
+
+def tag_guide_embed() -> discord.Embed:
+    b = "`✦`"
+    embed = discord.Embed(
+        description=(
+            f"# {E('me_servertag', '🏷️')} Server Tag\n"
+            f"Show off the **{STORE_NAME}** tag next to your name and get rewarded!\n\n"
+            f"### {E('me_giveaway', '🎁')} Perks\n"
+            f"> {b} **3x entries** in every giveaway\n"
+            f"> {b} The exclusive <@&{TAG_ROLE_ID}> role\n\n"
+            f"### {E('me_rules', '📋')} How to put it on\n"
+            f"> **1.** Click the **server name** at the top of the channel list\n"
+            f"> **2.** Choose **Server Tag**, then click **Adopt Tag**\n"
+            f"> {E('me_arrow', '➜')} *Or:* **User Settings → Profiles → Server Tag** → pick **{STORE_NAME}**\n"
+            f"> **3.** Click **Save Changes**\n"
+            f"> **4.** Come back here and press **Check my tag** below\n\n"
+            f"{E('me_no', '⚠️')} Take the tag off and you'll lose the role and the 3x entries."
+        ),
+        colour=COLOUR,
+    )
+    return embed
+
+
+class TosView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.tag.emoji = server_emoji("me_servertag", "🏷️")
+
+    @discord.ui.button(label="Server Tag", style=discord.ButtonStyle.secondary, custom_id="me:servertag")
+    async def tag(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await interaction.response.send_message(embed=tag_guide_embed(), view=TagCheckView(), ephemeral=True)
+
+
+class TagCheckView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.check.emoji = server_emoji("me_tick", "✅")
+
+    @discord.ui.button(label="Check my tag", style=discord.ButtonStyle.success, custom_id="me:checktag")
+    async def check(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await interaction.response.defer(ephemeral=True)
+        user = interaction.user
+        try:
+            user = await bot.fetch_user(interaction.user.id)  # fresh profile, includes the server tag
+        except discord.HTTPException:
+            pass
+        member = interaction.guild.get_member(interaction.user.id) or interaction.user
+        wearing = await sync_tag_role(member, wears_tag(user) or wears_tag(interaction.user))
+        if wearing:
+            text = (f"{E('me_tick', '✅')} **You're wearing our tag!** You've got <@&{TAG_ROLE_ID}> "
+                    f"and **3x entries** in every giveaway. Thank you! {E('me_respect', '🤍')}")
+        else:
+            text = (f"{E('me_no', '❌')} I can't see our tag on your profile yet. Follow the steps above, "
+                    "make sure you clicked **Save**, then press **Check my tag** again.")
+        await interaction.followup.send(text, ephemeral=True)
+
+
+@bot.event
+async def on_user_update(before: discord.User, after: discord.User) -> None:
+    was, now_wearing = wears_tag(before), wears_tag(after)
+    if was == now_wearing:
+        return
+    guild = bot.get_guild(GUILD_ID)
+    member = guild.get_member(after.id) if guild else None
+    if member:
+        await sync_tag_role(member, now_wearing)
+
+
+async def tag_sync_loop() -> None:
+    """Every 30 minutes, take the role off anyone who's removed the tag (in case an update was missed)."""
+    await bot.wait_until_ready()
+    while not bot.is_closed():
+        guild = bot.get_guild(GUILD_ID)
+        role = guild.get_role(TAG_ROLE_ID) if guild else None
+        if role:
+            for member in list(role.members):
+                if not wears_tag(member):
+                    try:
+                        fresh = await bot.fetch_user(member.id)
+                    except discord.HTTPException:
+                        continue
+                    if not wears_tag(fresh):
+                        await sync_tag_role(member, False)
+                    await asyncio.sleep(1)
+        await asyncio.sleep(1800)
+
+
+async def send_tos(channel: discord.abc.Messageable) -> discord.Message:
+    kwargs = {"embed": tos_embed(), "view": TosView()}
+    if BANNER_FILE.exists():
+        kwargs["file"] = discord.File(BANNER_FILE)
+        kwargs["embed"].set_image(url=f"attachment://{BANNER_FILE.name}")
+    message = await channel.send(**kwargs)
+    store.data["tos_post"] = {"channel": channel.id, "message": message.id}
+    store.save()
+    return message
+
+
+async def post_tos_once() -> None:
+    saved = store.data.get("tos_post")
+    channel = bot.get_channel(TOS_CHANNEL_ID)
+    if channel is None:
+        return
+    if saved:
+        try:
+            message = await bot.get_channel(saved["channel"]).fetch_message(saved["message"])
+            embed = tos_embed()
+            if message.embeds and message.embeds[0].image:
+                embed.set_image(url=message.embeds[0].image.url)
+            await message.edit(embed=embed, view=TosView())
+            return
+        except (discord.NotFound, AttributeError):
+            pass
+        except discord.HTTPException:
+            return
+    try:
+        await send_tos(channel)
+        log.info("Posted the terms of service")
+    except discord.HTTPException:
+        log.exception("Couldn't post the terms of service.")
+
+
+@bot.tree.command(name="tospanel", description="📜 Post the Terms of Service with the Server Tag button (admin)")
+@app_commands.default_permissions(administrator=True)
+@admin_only()
+async def tos_panel_cmd(interaction: discord.Interaction) -> None:
+    await interaction.response.defer(ephemeral=True)
+    await send_tos(interaction.channel)
+    await interaction.followup.send("✅ Terms of Service posted.", ephemeral=True)
+
+
 # ===========================================================================
 # /embed create
 # ===========================================================================
@@ -2352,8 +2551,9 @@ def giveaway_embed(gw: dict, image_url: str | None = None) -> discord.Embed:
         lines += ["", "### 📋 Requirements", *[f"> {r}" for r in req]]
         if gw.get("bypass_role"):
             lines.append(f"> ⚡ <@&{gw['bypass_role']}> skips all requirements")
+    lines += ["", f"### {E('me_servertag', '🏷️')} Extra entries", f"> <@&{TAG_ROLE_ID}> (server tag) gets **3x** entries"]
     if gw.get("bonus_role") and gw.get("bonus_entries"):
-        lines += ["", "### ✨ Extra entries", f"> <@&{gw['bonus_role']}> gets **+{gw['bonus_entries']}** entries"]
+        lines.append(f"> <@&{gw['bonus_role']}> gets **+{gw['bonus_entries']}** entries")
 
     if ended:
         winners = gw.get("winner_ids", [])
@@ -2408,7 +2608,7 @@ class GiveawayView(discord.ui.View):
                 embed = discord.Embed(title="❌ You can't enter yet", description="\n".join(missing), colour=discord.Colour.red())
                 return await reply(interaction, embed=embed)
 
-        entries = 1
+        entries = 3 if TAG_ROLE_ID in role_ids else 1  # server tag wearers get 3x
         if gw.get("bonus_role") and gw["bonus_role"] in role_ids:
             entries += gw.get("bonus_entries", 0)
         gw["entrants"][uid] = entries
