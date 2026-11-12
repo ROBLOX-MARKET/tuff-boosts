@@ -219,6 +219,8 @@ class MEBot(commands.Bot):
         self.add_view(GiveawayView())
         self.tree.add_command(embed_group)
         self.tree.add_command(giveaway_group)
+        self.tree.add_command(joinping_group)
+        self.tree.add_command(autorole_group)
         guild = discord.Object(id=GUILD_ID)
         self.tree.copy_global_to(guild=guild)
         try:
@@ -1234,13 +1236,26 @@ async def on_member_join(member: discord.Member) -> None:
         store.data["invited_by"][str(member.id)] = inviter.id
         store.save()
 
-    if cfg("auto_role") and not member.bot:
-        role = member.guild.get_role(cfg("auto_role"))
-        if role:
+    if not member.bot:
+        role_ids = set(store.data.get("config", {}).get("auto_roles", []))
+        if cfg("auto_role"):
+            role_ids.add(cfg("auto_role"))
+        roles = [r for r in (member.guild.get_role(i) for i in role_ids) if r is not None]
+        if roles:
             try:
-                await member.add_roles(role, reason="Auto role")
+                await member.add_roles(*roles, reason="Auto role")
             except discord.HTTPException:
-                log.exception("Couldn't give the auto role.")
+                log.exception("Couldn't give the auto role(s).")
+
+        # Ping on join: mention them in each chosen channel, then delete it straight away.
+        for channel_id in store.data.get("config", {}).get("join_ping_channels", []):
+            channel = bot.get_channel(channel_id)
+            if channel is None:
+                continue
+            try:
+                await channel.send(member.mention, delete_after=1.5, allowed_mentions=discord.AllowedMentions(users=[member]))
+            except discord.HTTPException:
+                log.exception("Couldn't send the join ping in %s.", channel_id)
 
     channel = bot.get_channel(cfg("welcome_channel")) if cfg("welcome_channel") else None
     if channel is None:
@@ -1385,6 +1400,89 @@ async def setup(
     embed = discord.Embed(title="⚙️ Bot setup", description="\n".join(lines), colour=COLOUR)
     embed.set_footer(text="Run /setup again any time to change something.")
     await reply(interaction, embed=embed)
+
+
+
+# ===========================================================================
+# Ping on join + auto roles
+# ===========================================================================
+
+joinping_group = app_commands.Group(
+    name="joinping", description="Ping new members in channels, then delete the ping",
+    default_permissions=discord.Permissions(administrator=True),
+)
+autorole_group = app_commands.Group(
+    name="autorole", description="Roles new members get automatically",
+    default_permissions=discord.Permissions(administrator=True),
+)
+
+
+def config_list(name: str) -> list[int]:
+    return store.data.setdefault("config", {}).setdefault(name, [])
+
+
+@joinping_group.command(name="add", description="📣 Ping new members in this channel (the ping deletes itself)")
+@admin_only()
+async def joinping_add(interaction: discord.Interaction, channel: discord.TextChannel) -> None:
+    channels = config_list("join_ping_channels")
+    if channel.id not in channels:
+        channels.append(channel.id)
+        store.save()
+    await reply(interaction, f"📣 New members will get a quick ghost ping in {channel.mention}.")
+
+
+@joinping_group.command(name="remove", description="🔕 Stop pinging new members in this channel")
+@admin_only()
+async def joinping_remove(interaction: discord.Interaction, channel: discord.TextChannel) -> None:
+    channels = config_list("join_ping_channels")
+    if channel.id in channels:
+        channels.remove(channel.id)
+        store.save()
+    await reply(interaction, f"🔕 Removed {channel.mention} from join pings.")
+
+
+@joinping_group.command(name="list", description="📋 See which channels ping new members")
+@admin_only()
+async def joinping_list(interaction: discord.Interaction) -> None:
+    channels = config_list("join_ping_channels")
+    text = "\n".join(f"📣 <#{c}>" for c in channels) or "No channels yet. Use `/joinping add`."
+    await reply(interaction, embed=discord.Embed(title="📣 Join ping channels", description=text, colour=COLOUR))
+
+
+@autorole_group.command(name="add", description="🎭 Give this role to everyone who joins")
+@admin_only()
+async def autorole_add(interaction: discord.Interaction, role: discord.Role) -> None:
+    if role >= interaction.guild.me.top_role:
+        return await reply(interaction, "❌ That role is above mine, so I can't give it. Move my role higher first.")
+    if role.managed or role.is_default():
+        return await reply(interaction, "❌ That role can't be given out.")
+    roles = config_list("auto_roles")
+    if role.id not in roles:
+        roles.append(role.id)
+        store.save()
+    await reply(interaction, f"🎭 New members will now get {role.mention}.")
+
+
+@autorole_group.command(name="remove", description="➖ Stop giving this role to new members")
+@admin_only()
+async def autorole_remove(interaction: discord.Interaction, role: discord.Role) -> None:
+    roles = config_list("auto_roles")
+    if role.id in roles:
+        roles.remove(role.id)
+    if store.data.get("config", {}).get("auto_role") == role.id:
+        store.data["config"]["auto_role"] = None
+    store.save()
+    await reply(interaction, f"➖ New members won't get {role.mention} any more.")
+
+
+@autorole_group.command(name="list", description="📋 See which roles new members get")
+@admin_only()
+async def autorole_list(interaction: discord.Interaction) -> None:
+    ids = list(config_list("auto_roles"))
+    if cfg("auto_role") and cfg("auto_role") not in ids:
+        ids.append(cfg("auto_role"))
+    text = "\n".join(f"🎭 <@&{r}>" for r in ids) or "No auto roles yet. Use `/autorole add`."
+    await reply(interaction, embed=discord.Embed(title="🎭 Auto roles", description=text, colour=COLOUR))
 
 
 # ===========================================================================
