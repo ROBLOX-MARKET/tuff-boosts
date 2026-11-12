@@ -219,6 +219,7 @@ class MEBot(commands.Bot):
         self.add_view(TicketControlsView())
         self.add_view(GiveawayView())
         self.add_view(PingRolesView())
+        self.add_view(LegitView())
         self.tree.add_command(embed_group)
         self.tree.add_command(giveaway_group)
         self.tree.add_command(joinping_group)
@@ -252,6 +253,7 @@ class MEBot(commands.Bot):
         await upload_chrome_emojis()
         await set_avatar()
         await post_roles_panel_once()
+        await post_legit_panel_once()
 
     async def log_to(self, channel_id: int | None, embed: discord.Embed, file: discord.File | None = None) -> None:
         if not channel_id:
@@ -2054,6 +2056,124 @@ async def roles_panel_cmd(interaction: discord.Interaction) -> None:
     await interaction.response.defer(ephemeral=True)
     await send_roles_panel(interaction.channel)
     await interaction.followup.send("✅ Ping roles panel posted.", ephemeral=True)
+
+
+
+# ===========================================================================
+# "Are we legit?" panel with tick reaction + vouch form
+# ===========================================================================
+
+LEGIT_CHANNEL_ID = 1570045782860763246
+
+
+def legit_embed() -> discord.Embed:
+    tick = E("me_tick", "✅")
+    embed = discord.Embed(
+        description=(
+            f"# {tick} Are we legit?\n"
+            f"Bought from **{STORE_NAME}** before? Let everyone know!\n\n"
+            f"> {tick} **React with {tick} below** if you've bought from us\n"
+            f"> {E('me_rules', '📝')} **Click Leave a vouch** and fill in the quick form\n"
+            f"> {E('me_timer', '⏱️')} Takes less than **30 seconds**\n\n"
+            f"{E('me_respect', '🤍')} Every vouch helps new customers trust us. **Thank you for your support!**"
+        ),
+        colour=COLOUR,
+    )
+    embed.set_footer(text=f"{STORE_NAME} • Trusted & legit")
+    return embed
+
+
+class LegitVouchModal(discord.ui.Modal, title="Leave a vouch"):
+    product = discord.ui.TextInput(label="What did you buy?", placeholder="e.g. 14x Server Boosts", max_length=150)
+    price = discord.ui.TextInput(label="How much did you pay?", placeholder="e.g. £10", max_length=50)
+    rating = discord.ui.TextInput(label="Rating out of 5", placeholder="1, 2, 3, 4 or 5", min_length=1, max_length=1)
+    comment = discord.ui.TextInput(label="Anything else? (optional)", style=discord.TextStyle.paragraph,
+                                   required=False, max_length=500, placeholder="Fast delivery, great service...")
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        if self.rating.value not in {"1", "2", "3", "4", "5"}:
+            return await reply(interaction, f"{E('me_no', '❌')} The rating has to be a number from 1 to 5.")
+        rating = int(self.rating.value)
+        store.data.setdefault("vouches", [])
+        number = store.data.get("vouch_count", 0) + 1
+        store.data["vouch_count"] = number
+        when = now()
+        store.data["vouches"].append({
+            "id": number, "for": GUILD_ID, "by": interaction.user.id, "product": self.product.value,
+            "price": self.price.value, "rating": rating, "comment": self.comment.value or None, "time": when.timestamp(),
+        })
+        store.save()
+
+        embed = discord.Embed(title="New vouch created!", description=stars(rating), colour=COLOUR, timestamp=when)
+        embed.set_thumbnail(url=interaction.user.display_avatar.url)
+        embed.add_field(name="Vouched by:", value=interaction.user.mention, inline=True)
+        embed.add_field(name="Vouch Nº:", value=str(number), inline=True)
+        embed.add_field(name="Vouched at:", value=ts(when, "f"), inline=True)
+        embed.add_field(name="Product:", value=self.product.value, inline=True)
+        embed.add_field(name="Paid:", value=self.price.value, inline=True)
+        if self.comment.value:
+            embed.add_field(name="Comment:", value=self.comment.value, inline=False)
+        icon = interaction.guild.icon.url if interaction.guild.icon else None
+        embed.set_footer(text=STORE_NAME, icon_url=icon)
+
+        target = (bot.get_channel(cfg("vouch_channel")) if cfg("vouch_channel") else None) or interaction.channel
+        await target.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+        where = f" in {target.mention}" if target.id != interaction.channel.id else ""
+        await reply(interaction, f"{E('me_tick', '✅')} Thanks for the vouch! It's been posted{where}.")
+
+
+class LegitView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.vouch.emoji = server_emoji("me_rules", "📝")
+
+    @discord.ui.button(label="Leave a vouch", style=discord.ButtonStyle.secondary, custom_id="me:legit_vouch")
+    async def vouch(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await interaction.response.send_modal(LegitVouchModal())
+
+
+async def send_legit_panel(channel: discord.abc.Messageable) -> discord.Message:
+    kwargs = {"embed": legit_embed(), "view": LegitView()}
+    if BANNER_FILE.exists():
+        kwargs["file"] = discord.File(BANNER_FILE)
+        kwargs["embed"].set_image(url=f"attachment://{BANNER_FILE.name}")
+    message = await channel.send(**kwargs)
+    try:
+        await message.add_reaction(server_emoji("me_tick", "✅"))
+    except discord.HTTPException:
+        log.exception("Couldn't add the tick reaction.")
+    store.data["legit_panel"] = {"channel": channel.id, "message": message.id}
+    store.save()
+    return message
+
+
+async def post_legit_panel_once() -> None:
+    saved = store.data.get("legit_panel")
+    channel = bot.get_channel(LEGIT_CHANNEL_ID)
+    if channel is None:
+        return
+    if saved:
+        try:
+            await bot.get_channel(saved["channel"]).fetch_message(saved["message"])
+            return
+        except (discord.NotFound, AttributeError):
+            pass
+        except discord.HTTPException:
+            return
+    try:
+        await send_legit_panel(channel)
+        log.info("Posted the legit check panel")
+    except discord.HTTPException:
+        log.exception("Couldn't post the legit check panel.")
+
+
+@bot.tree.command(name="legitpanel", description="✅ Post the 'Are we legit?' panel in this channel (admin)")
+@app_commands.default_permissions(administrator=True)
+@admin_only()
+async def legit_panel_cmd(interaction: discord.Interaction) -> None:
+    await interaction.response.defer(ephemeral=True)
+    await send_legit_panel(interaction.channel)
+    await interaction.followup.send("✅ Legit panel posted.", ephemeral=True)
 
 
 # ===========================================================================
