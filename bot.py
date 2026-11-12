@@ -235,6 +235,8 @@ class MEBot(commands.Bot):
 
     async def on_ready(self) -> None:
         log.info("Logged in as %s", self.user)
+        for guild in list(self.guilds):
+            await leave_if_not_ours(guild)
         await cache_invites()
         await upload_chrome_emojis()
         await set_avatar()
@@ -253,6 +255,21 @@ class MEBot(commands.Bot):
 
 
 bot = MEBot()
+
+
+async def leave_if_not_ours(guild: discord.Guild) -> None:
+    """This bot only works in your server, so it leaves anywhere else straight away."""
+    if guild.id != GUILD_ID:
+        log.warning("Leaving server I'm not allowed in: %s (%s)", guild.name, guild.id)
+        try:
+            await guild.leave()
+        except discord.HTTPException:
+            log.exception("Couldn't leave %s", guild.id)
+
+
+@bot.event
+async def on_guild_join(guild: discord.Guild) -> None:
+    await leave_if_not_ours(guild)
 
 
 async def save_loop() -> None:
