@@ -855,7 +855,7 @@ async def upload_chrome_emojis() -> None:
     if guild is None or not EMOJI_DIR.exists():
         return
     have = {e.name.lower() for e in guild.emojis}
-    for path in sorted(EMOJI_DIR.glob("*.png")):
+    for path in sorted([*EMOJI_DIR.glob("*.png"), *EMOJI_DIR.glob("*.gif")]):
         if path.stem.lower() in have:
             continue
         try:
@@ -1353,10 +1353,8 @@ async def send_welcome(channel: discord.abc.Messageable, member: discord.Member,
     else:
         joined = ""
 
-    branches = []
-    for i, channel_id in enumerate(WELCOME_CHANNELS):
-        branch = "╰" if i == len(WELCOME_CHANNELS) - 1 else "├"
-        branches.append(f"> {branch} <#{channel_id}>")
+    arrow = E("me_arrow", "➜")
+    branches = [f"> {arrow} <#{channel_id}>" for channel_id in WELCOME_CHANNELS]
 
     lines = [
         f"# {E('respect', '👋')} Welcome to {STORE_NAME}",
