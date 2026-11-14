@@ -2556,6 +2556,202 @@ async def info_panel_cmd(interaction: discord.Interaction) -> None:
     await interaction.followup.send("✅ Server info posted.", ephemeral=True)
 
 
+
+# ===========================================================================
+# Boost keys: /addkeys, /availablekeys (redeem + mark used), /keys
+# ===========================================================================
+
+KEY_USERS = {1001419810699223071, 1492971645747593256}  # Ehsan, Munzy
+REDEEM_URL = "https://epicboosting.xyz/redeem/"
+KEYS_PER_PAGE = 4
+KEY_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{5,120}")
+
+
+def key_user_only():
+    async def predicate(interaction: discord.Interaction) -> bool:
+        if interaction.user.id in KEY_USERS:
+            return True
+        raise app_commands.CheckFailure(f"{E('me_no', '❌')} You don't have access to keys.")
+    return app_commands.check(predicate)
+
+
+def all_keys() -> list[dict]:
+    return store.data.setdefault("keys", [])
+
+
+def unused_keys(product: str | None = None) -> list[dict]:
+    return [k for k in all_keys() if not k.get("used_by") and (product is None or k["product"] == product)]
+
+
+def clean_key(line: str) -> str | None:
+    line = line.strip()
+    if "/redeem/" in line:
+        line = line.rsplit("/redeem/", 1)[1]
+    line = line.strip().strip("/").split("?")[0]
+    m = KEY_RE.fullmatch(line)
+    return m.group(0) if m else None
+
+
+class AddKeysModal(discord.ui.Modal, title="Add keys"):
+    product = discord.ui.TextInput(label="What are these keys for?", placeholder="e.g. 14x Boosts - 1 Month", max_length=80)
+    keys = discord.ui.TextInput(label="Keys (one per line)", style=discord.TextStyle.paragraph,
+                                placeholder="Paste keys or redeem links, one per line", max_length=4000)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        product = self.product.value.strip()
+        existing = {k["key"] for k in all_keys()}
+        added, dupes, bad = 0, 0, 0
+        for line in self.keys.value.splitlines():
+            if not line.strip():
+                continue
+            key = clean_key(line)
+            if key is None:
+                bad += 1
+                continue
+            if key in existing:
+                dupes += 1
+                continue
+            existing.add(key)
+            store.data["key_count"] = store.data.get("key_count", 0) + 1
+            all_keys().append({"id": store.data["key_count"], "key": key, "product": product,
+                               "added_by": interaction.user.id, "added_at": now().timestamp(),
+                               "used_by": None, "used_at": None})
+            added += 1
+        store.save()
+        lines = [f"{E('me_tick', '✅')} Added **{added}** key{'s' if added != 1 else ''} for **{product}**."]
+        if dupes:
+            lines.append(f"{E('me_restock', '🔁')} Skipped **{dupes}** already added.")
+        if bad:
+            lines.append(f"{E('me_no', '❌')} Skipped **{bad}** line{'s' if bad != 1 else ''} that didn't look like a key.")
+        lines.append(f"{E('me_chart', '📊')} **{len(unused_keys(product))}** {product} keys now available.")
+        await reply(interaction, "\n".join(lines))
+
+
+@bot.tree.command(name="addkeys", description="🔑 Add boost keys (key users only)")
+@key_user_only()
+async def addkeys(interaction: discord.Interaction) -> None:
+    await interaction.response.send_modal(AddKeysModal())
+
+
+def keys_page(page: int, product: str | None) -> tuple[discord.Embed, list[dict], int]:
+    items = unused_keys(product)
+    pages = max(1, (len(items) + KEYS_PER_PAGE - 1) // KEYS_PER_PAGE)
+    page = max(0, min(page, pages - 1))
+    shown = items[page * KEYS_PER_PAGE:(page + 1) * KEYS_PER_PAGE]
+
+    counts: dict[str, int] = {}
+    for k in unused_keys():
+        counts[k["product"]] = counts.get(k["product"], 0) + 1
+    stock = "\n".join(f"> `✦` **{p}** — {n} key{'s' if n != 1 else ''}" for p, n in sorted(counts.items())) or "> No keys in stock."
+
+    lines = [f"### {E('me_rocket', '🔑')} Available keys", stock, ""]
+    if product:
+        lines.append(f"Showing **{product}** only")
+    for k in shown:
+        lines.append(f"**#{k['id']} · {k['product']}**\n`{k['key']}`")
+    if not shown:
+        lines.append("Nothing to redeem right now. Use `/addkeys` to add more.")
+    embed = discord.Embed(description="\n".join(lines), colour=COLOUR)
+    embed.set_footer(text=f"Page {page + 1} of {pages} • {len(items)} key{'s' if len(items) != 1 else ''} • Only you can see this")
+    return embed, shown, pages
+
+
+class KeysView(discord.ui.View):
+    def __init__(self, viewer_id: int, page: int = 0, product: str | None = None):
+        super().__init__(timeout=900)
+        self.viewer_id, self.page, self.product = viewer_id, page, product
+        self.build()
+
+    def build(self) -> None:
+        self.clear_items()
+        embed, shown, pages = keys_page(self.page, self.product)
+        self.embed = embed
+        for row, k in enumerate(shown):
+            self.add_item(discord.ui.Button(label=f"Redeem #{k['id']}", emoji=server_emoji("me_rocket", "🚀"),
+                                            style=discord.ButtonStyle.link, url=REDEEM_URL + k["key"], row=row))
+            used = discord.ui.Button(label="Mark used", emoji=server_emoji("me_tick", "✅"),
+                                     style=discord.ButtonStyle.secondary, row=row)
+            used.callback = self.mark_used(k["id"])
+            self.add_item(used)
+        if pages > 1:
+            prev = discord.ui.Button(label="Back", style=discord.ButtonStyle.secondary, row=4, disabled=self.page == 0)
+            nxt = discord.ui.Button(label="Next", style=discord.ButtonStyle.secondary, row=4, disabled=self.page >= pages - 1)
+            prev.callback = self.turn(-1)
+            nxt.callback = self.turn(1)
+            self.add_item(prev)
+            self.add_item(nxt)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return interaction.user.id == self.viewer_id
+
+    def turn(self, step: int):
+        async def cb(interaction: discord.Interaction) -> None:
+            self.page += step
+            self.build()
+            await interaction.response.edit_message(embed=self.embed, view=self)
+        return cb
+
+    def mark_used(self, key_id: int):
+        async def cb(interaction: discord.Interaction) -> None:
+            for k in all_keys():
+                if k["id"] == key_id and not k.get("used_by"):
+                    k["used_by"] = interaction.user.id
+                    k["used_at"] = now().timestamp()
+                    store.save()
+                    break
+            self.build()
+            await interaction.response.edit_message(embed=self.embed, view=self)
+            await interaction.followup.send(f"{E('me_tick', '✅')} Key #{key_id} marked as used.", ephemeral=True)
+        return cb
+
+
+async def product_autocomplete(interaction: discord.Interaction, current: str):
+    products = sorted({k["product"] for k in unused_keys()})
+    return [app_commands.Choice(name=p[:100], value=p[:100]) for p in products if current.lower() in p.lower()][:25]
+
+
+@bot.tree.command(name="availablekeys", description="🔑 See the boost keys you can redeem (only you can see it)")
+@key_user_only()
+@app_commands.describe(product="Only show keys for this (optional)")
+@app_commands.autocomplete(product=product_autocomplete)
+async def availablekeys(interaction: discord.Interaction, product: str = None) -> None:
+    view = KeysView(interaction.user.id, 0, product)
+    await interaction.response.send_message(embed=view.embed, view=view, ephemeral=True)
+
+
+@bot.tree.command(name="keys", description="📊 Key stock and history (key users only)")
+@key_user_only()
+async def keys_overview(interaction: discord.Interaction) -> None:
+    stock: dict[str, list[int]] = {}
+    for k in all_keys():
+        s_ = stock.setdefault(k["product"], [0, 0])
+        s_[1 if k.get("used_by") else 0] += 1
+    lines = [f"### {E('me_chart', '📊')} Key stock"]
+    for p, (free, used) in sorted(stock.items()):
+        lines.append(f"> `✦` **{p}** — {free} available · {used} used")
+    if not stock:
+        lines.append("> No keys yet. Use `/addkeys`.")
+    recent = [k for k in all_keys() if k.get("used_by")][-8:]
+    if recent:
+        lines += ["", f"### {E('me_tick', '✅')} Recently used"]
+        for k in reversed(recent):
+            lines.append(f"`#{k['id']}` {k['product']} · <@{k['used_by']}> · {ts(k['used_at'], 'R')}")
+    await reply(interaction, embed=discord.Embed(description="\n".join(lines), colour=COLOUR))
+
+
+@bot.tree.command(name="removekey", description="🗑️ Delete a key by its number (key users only)")
+@key_user_only()
+@app_commands.describe(number="The key number, e.g. 12")
+async def removekey(interaction: discord.Interaction, number: int) -> None:
+    keys = all_keys()
+    match = next((k for k in keys if k["id"] == number), None)
+    if match is None:
+        return await reply(interaction, f"{E('me_no', '❌')} There's no key #{number}.")
+    keys.remove(match)
+    store.save()
+    await reply(interaction, f"🗑️ Removed key #{number} ({match['product']}).")
+
+
 # ===========================================================================
 # /embed create
 # ===========================================================================
