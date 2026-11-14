@@ -219,7 +219,7 @@ class MEBot(commands.Bot):
         self.add_view(TicketControlsView())
         self.add_view(GiveawayView())
         self.add_view(PingRolesView())
-        self.add_view(LegitView())
+        self.add_view(LegitLayout())
         self.add_view(TosLayout())
         self.add_view(InfoLayout())
         self.add_view(TagCheckView())
@@ -2157,81 +2157,67 @@ async def roles_panel_cmd(interaction: discord.Interaction) -> None:
 LEGIT_CHANNEL_ID = 1570045782860763246
 
 
-def legit_embed() -> discord.Embed:
-    tick = E("me_tick", "✅")
-    embed = discord.Embed(
-        description=(
-            f"# {tick} Are we legit?\n"
-            f"Bought from **{STORE_NAME}** before? Let everyone know!\n\n"
-            f"> {tick} **React with {tick} below** if you've bought from us\n\n"
-            f"{E('me_respect', '🤍')} Every vouch helps new customers trust us. **Thank you for your support!**"
-        ),
-        colour=COLOUR,
-    )
-    embed.set_footer(text=f"{STORE_NAME} • Trusted & legit")
-    return embed
+# key: (display name, user id)
+LEGIT_PEOPLE = {
+    "ehsan": ("EHSAN", 1001419810699223071),
+    "munzy": ("MUNZY", 1492971645747593256),
+}
 
 
-class LegitVouchModal(discord.ui.Modal, title="Leave a vouch"):
-    product = discord.ui.TextInput(label="What did you buy?", placeholder="e.g. 14x Server Boosts", max_length=150)
-    price = discord.ui.TextInput(label="How much did you pay?", placeholder="e.g. £10", max_length=50)
-    rating = discord.ui.TextInput(label="Rating out of 5", placeholder="1, 2, 3, 4 or 5", min_length=1, max_length=1)
-    comment = discord.ui.TextInput(label="Anything else? (optional)", style=discord.TextStyle.paragraph,
-                                   required=False, max_length=500, placeholder="Fast delivery, great service...")
+def legit_votes(key: str) -> list[int]:
+    return store.data.setdefault("legit_votes", {}).setdefault(key, [])
 
-    async def on_submit(self, interaction: discord.Interaction) -> None:
-        if self.rating.value not in {"1", "2", "3", "4", "5"}:
-            return await reply(interaction, f"{E('me_no', '❌')} The rating has to be a number from 1 to 5.")
-        rating = int(self.rating.value)
-        store.data.setdefault("vouches", [])
-        number = store.data.get("vouch_count", 0) + 1
-        store.data["vouch_count"] = number
-        when = now()
-        store.data["vouches"].append({
-            "id": number, "for": GUILD_ID, "by": interaction.user.id, "product": self.product.value,
-            "price": self.price.value, "rating": rating, "comment": self.comment.value or None, "time": when.timestamp(),
-        })
+
+class LegitTick(discord.ui.Button):
+    def __init__(self, key: str):
+        name, _ = LEGIT_PEOPLE[key]
+        count = len(legit_votes(key))
+        super().__init__(label=f"{name.title()} • {count}", emoji=server_emoji("me_tick", "✅"),
+                         style=discord.ButtonStyle.secondary, custom_id=f"me:legit:{key}")
+        self.key = key
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        votes = legit_votes(self.key)
+        name = LEGIT_PEOPLE[self.key][0].title()
+        if interaction.user.id in votes:
+            votes.remove(interaction.user.id)
+            note = f"Removed your tick for **{name}**."
+        else:
+            votes.append(interaction.user.id)
+            note = f"{E('me_tick', '✅')} Thanks for vouching for **{name}**!"
         store.save()
-
-        embed = discord.Embed(title="New vouch created!", description=stars(rating), colour=COLOUR, timestamp=when)
-        embed.set_thumbnail(url=interaction.user.display_avatar.url)
-        embed.add_field(name="Vouched by:", value=interaction.user.mention, inline=True)
-        embed.add_field(name="Vouch Nº:", value=str(number), inline=True)
-        embed.add_field(name="Vouched at:", value=ts(when, "f"), inline=True)
-        embed.add_field(name="Product:", value=self.product.value, inline=True)
-        embed.add_field(name="Paid:", value=self.price.value, inline=True)
-        if self.comment.value:
-            embed.add_field(name="Comment:", value=self.comment.value, inline=False)
-        icon = interaction.guild.icon.url if interaction.guild.icon else None
-        embed.set_footer(text=STORE_NAME, icon_url=icon)
-
-        target = (bot.get_channel(cfg("vouch_channel")) if cfg("vouch_channel") else None) or interaction.channel
-        await target.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
-        where = f" in {target.mention}" if target.id != interaction.channel.id else ""
-        await reply(interaction, f"{E('me_tick', '✅')} Thanks for the vouch! It's been posted{where}.")
+        await interaction.response.edit_message(view=LegitLayout())
+        await interaction.followup.send(note, ephemeral=True)
 
 
-class LegitView(discord.ui.View):
+class LegitLayout(discord.ui.LayoutView):
     def __init__(self):
         super().__init__(timeout=None)
-        self.vouch.emoji = server_emoji("me_rules", "📝")
-
-    @discord.ui.button(label="Leave a vouch", style=discord.ButtonStyle.secondary, custom_id="me:legit_vouch")
-    async def vouch(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        await interaction.response.send_modal(LegitVouchModal())
+        tick = E("me_tick", "✅")
+        parts: list[discord.ui.Item] = [
+            discord.ui.TextDisplay(
+                f"# {tick} Are we legit?\n"
+                f"Bought from **{STORE_NAME}** before? Tick the person who served you."
+            ),
+            discord.ui.Separator(),
+        ]
+        for i, (key, (name, uid)) in enumerate(LEGIT_PEOPLE.items()):
+            parts.append(discord.ui.Section(
+                discord.ui.TextDisplay(f"### {E('me_crown', '👑')} {name}\nTick if <@{uid}> is legit"),
+                accessory=LegitTick(key),
+            ))
+            if i < len(LEGIT_PEOPLE) - 1:
+                parts.append(discord.ui.Separator())
+        parts.append(discord.ui.Separator())
+        parts.append(discord.ui.TextDisplay(
+            f"-# {E('me_respect', '🤍')} Every tick helps new customers trust us. Click again to remove yours."
+        ))
+        self.add_item(discord.ui.Container(*parts, accent_color=COLOUR))
 
 
 async def send_legit_panel(channel: discord.abc.Messageable) -> discord.Message:
-    kwargs = {"embed": legit_embed()}
-    if BANNER_FILE.exists():
-        kwargs["file"] = discord.File(BANNER_FILE)
-        kwargs["embed"].set_image(url=f"attachment://{BANNER_FILE.name}")
-    message = await channel.send(**kwargs)
-    try:
-        await message.add_reaction(server_emoji("me_tick", "✅"))
-    except discord.HTTPException:
-        log.exception("Couldn't add the tick reaction.")
-    store.data["legit_panel"] = {"channel": channel.id, "message": message.id}
+    message = await channel.send(view=LegitLayout(), allowed_mentions=discord.AllowedMentions.none())
+    store.data["legit_panel"] = {"channel": channel.id, "message": message.id, "style": "two"}
     store.save()
     return message
 
@@ -2244,21 +2230,19 @@ async def post_legit_panel_once() -> None:
     if saved:
         try:
             message = await bot.get_channel(saved["channel"]).fetch_message(saved["message"])
-            # Keep the posted panel up to date with the latest wording.
-            embed = legit_embed()
-            if message.embeds and message.embeds[0].image:
-                embed.set_image(url=message.embeds[0].image.url)
-            await message.edit(embed=embed, view=None)
-            return
+            if saved.get("style") == "two":
+                await message.edit(view=LegitLayout())  # refresh counts and wording
+                return
+            await message.delete()  # old single-tick version: replace it
         except (discord.NotFound, AttributeError):
             pass
         except discord.HTTPException:
             return
     try:
         await send_legit_panel(channel)
-        log.info("Posted the legit check panel")
+        log.info("Posted the legit panel")
     except discord.HTTPException:
-        log.exception("Couldn't post the legit check panel.")
+        log.exception("Couldn't post the legit panel.")
 
 
 @bot.tree.command(name="legitpanel", description="✅ Post the 'Are we legit?' panel in this channel (admin)")
