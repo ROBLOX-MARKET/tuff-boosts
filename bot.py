@@ -260,6 +260,7 @@ class MEBot(commands.Bot):
         await post_tos_once()
         await post_info_once()
         self.loop.create_task(tag_sync_loop())
+        self.loop.create_task(crypto_daily_loop())
 
     async def log_to(self, channel_id: int | None, embed: discord.Embed, file: discord.File | None = None) -> None:
         if not channel_id:
@@ -2750,6 +2751,121 @@ async def removekey(interaction: discord.Interaction, number: int) -> None:
     keys.remove(match)
     store.save()
     await reply(interaction, f"🗑️ Removed key #{number} ({match['product']}).")
+
+
+
+# ===========================================================================
+# Crypto prices: /crypto + a daily report
+# ===========================================================================
+
+CRYPTO_CHANNEL_ID: int | None = None   # set from the channel link
+CRYPTO_REPORT_HOUR = 9                 # UK time (24h)
+COINS = [  # (coingecko id, ticker, name, fallback emoji)
+    ("bitcoin", "BTC", "Bitcoin", "🟠"),
+    ("ethereum", "ETH", "Ethereum", "🔷"),
+    ("solana", "SOL", "Solana", "🟣"),
+    ("litecoin", "LTC", "Litecoin", "⚪"),
+]
+MARKETS_URL = "https://api.coingecko.com/api/v3/coins/markets"
+
+
+async def fetch_crypto() -> dict | None:
+    ids = ",".join(c[0] for c in COINS)
+    out: dict[str, dict] = {}
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as session:
+            for cur in ("gbp", "usd"):
+                params = {"vs_currency": cur, "ids": ids, "price_change_percentage": "24h,7d"}
+                async with session.get(MARKETS_URL, params=params) as r:
+                    if r.status != 200:
+                        log.error("Crypto API said %s", r.status)
+                        return None
+                    for row in await r.json():
+                        d = out.setdefault(row["id"], {})
+                        d[cur] = row.get("current_price")
+                        if cur == "gbp":
+                            d["ch24"] = row.get("price_change_percentage_24h_in_currency")
+                            d["ch7"] = row.get("price_change_percentage_7d_in_currency")
+                            d["hi"] = row.get("high_24h")
+                            d["lo"] = row.get("low_24h")
+    except (aiohttp.ClientError, asyncio.TimeoutError, ValueError, KeyError):
+        log.exception("Couldn't fetch crypto prices.")
+        return None
+    return out
+
+
+def money(v: float | None, sym: str) -> str:
+    if v is None:
+        return "—"
+    return f"{sym}{v:,.2f}" if v >= 1 else f"{sym}{v:,.4f}"
+
+
+def change(v: float | None) -> str:
+    if v is None:
+        return "—"
+    arrow = "▲" if v >= 0 else "▼"
+    return f"{arrow} {abs(v):.2f}%"
+
+
+def crypto_embed(data: dict, title: str) -> discord.Embed:
+    lines = [f"### {E('me_chart', '📊')} {title}", f"-# {now():%A %d %B %Y} • prices in £ and $", ""]
+    for cid, ticker, name, emoji in COINS:
+        d = data.get(cid)
+        if not d:
+            continue
+        up = (d.get("ch24") or 0) >= 0
+        lines.append(
+            f"**{emoji} {name}** `{ticker}`\n"
+            f"> **{money(d.get('gbp'), '£')}** · {money(d.get('usd'), '$')}\n"
+            f"> 24h **{change(d.get('ch24'))}** {'🟢' if up else '🔴'} · 7d {change(d.get('ch7'))}\n"
+            f"> 24h range {money(d.get('lo'), '£')} – {money(d.get('hi'), '£')}"
+        )
+    best = max((c for c in COINS if data.get(c[0], {}).get("ch24") is not None),
+               key=lambda c: data[c[0]]["ch24"], default=None)
+    if best:
+        lines += ["", f"{E('me_trophy', '🏆')} Best today: **{best[2]}** ({change(data[best[0]]['ch24'])})"]
+    embed = discord.Embed(description="\n".join(lines), colour=COLOUR, timestamp=now())
+    embed.set_footer(text=f"{STORE_NAME} • Prices from CoinGecko")
+    return embed
+
+
+@bot.tree.command(name="crypto", description="📊 Live prices for Bitcoin, Ethereum, Solana and Litecoin")
+async def crypto_cmd(interaction: discord.Interaction) -> None:
+    await interaction.response.defer()
+    data = await fetch_crypto()
+    if not data:
+        return await interaction.followup.send(f"{E('me_no', '❌')} Couldn't get prices right now. Try again in a minute.")
+    await interaction.followup.send(embed=crypto_embed(data, "Crypto prices"))
+
+
+def uk_now() -> datetime:
+    # UK time: GMT in winter, BST (UTC+1) from the last Sunday of March to the last Sunday of October
+    t = now()
+    y = t.year
+    def last_sunday(month):
+        d = datetime(y, month, 31 if month in (3, 10) else 30, 1, tzinfo=timezone.utc)
+        return d - timedelta(days=(d.weekday() + 1) % 7)
+    bst = last_sunday(3) <= t < last_sunday(10)
+    return t + timedelta(hours=1 if bst else 0)
+
+
+async def crypto_daily_loop() -> None:
+    await bot.wait_until_ready()
+    while not bot.is_closed():
+        try:
+            channel_id = cfg("crypto_channel") or CRYPTO_CHANNEL_ID
+            uk = uk_now()
+            today = uk.strftime("%Y-%m-%d")
+            if channel_id and uk.hour >= CRYPTO_REPORT_HOUR and store.data.get("crypto_last_report") != today:
+                channel = bot.get_channel(channel_id)
+                data = await fetch_crypto()
+                if channel and data:
+                    await channel.send(embed=crypto_embed(data, "Daily Crypto Report"))
+                    store.data["crypto_last_report"] = today
+                    store.save()
+        except Exception:
+            log.exception("Daily crypto report failed.")
+        await asyncio.sleep(300)
 
 
 # ===========================================================================
