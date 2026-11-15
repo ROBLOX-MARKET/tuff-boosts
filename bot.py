@@ -29,6 +29,7 @@ log = logging.getLogger("crypto-checker")
 TOKEN = os.getenv("BOT_TOKEN", "").strip()
 OWNER_ID = int(os.getenv("OWNER_ID", "1492971645747593256") or "0")  # who gets the DM alerts
 CHECKER_NAME = os.getenv("CHECKER_NAME", "Crypto Checker").strip() or "Crypto Checker"
+GUILD_ID = int(os.getenv("GUILD_ID", "1568906642014212136") or "0")  # sync slash cmds here instantly (0 = global)
 ETHERSCAN_KEY = os.getenv("ETHERSCAN_KEY", "").strip()  # one free key covers ETH + BSC (send/receive alerts for tokens)
 GREEN = 0x57F287
 POLL_SECONDS = 60
@@ -49,35 +50,28 @@ WALLETS = [
     {
         "symbol": "USDC", "name": "USDC", "network": "Ethereum", "coin": "usd-coin",
         "chain": "token", "evm": "eth", "contract": USDC_ETH, "decimals": 6,
-        "address": "0x8B3549061FD38D34810971f8D8A33D62966cF614",
+        "address": "PASTE_YOUR_USDC_ETH_ADDRESS",
         "icon": "https://assets.coingecko.com/coins/images/6319/small/usdc.png",
         "explorer_addr": "https://etherscan.io/address/", "explorer_tx": "https://etherscan.io/tx/",
     },
     {
         "symbol": "USDT", "name": "USDT", "network": "BNB Smart Chain (BEP20)", "coin": "tether",
         "chain": "token", "evm": "bsc", "contract": USDT_BSC, "decimals": 18,
-        "address": "0x8B3549061FD38D34810971f8D8A33D62966cF614",
+        "address": "PASTE_YOUR_USDT_BSC_ADDRESS",
         "icon": "https://assets.coingecko.com/coins/images/325/small/Tether.png",
         "explorer_addr": "https://bscscan.com/address/", "explorer_tx": "https://bscscan.com/tx/",
     },
     {
         "symbol": "LTC", "name": "Litecoin", "network": "Litecoin", "coin": "litecoin",
         "chain": "ltc", "decimals": 8,
-        "address": "LTQsGfYiTR7wpfcuR8SsMxFqEbfp58s5o9",
+        "address": "PASTE_YOUR_LTC_ADDRESS",
         "icon": "https://assets.coingecko.com/coins/images/2/small/litecoin.png",
         "explorer_addr": "https://litecoinspace.org/address/", "explorer_tx": "https://litecoinspace.org/tx/",
     },
     {
-        "symbol": "BTC", "name": "Bitcoin", "network": "Bitcoin", "coin": "bitcoin",
-        "chain": "btc", "decimals": 8,
-        "address": "bc1qvsdxjfrgaf8573ka9k748fmnk3uhjupp0s2hk9",
-        "icon": "https://assets.coingecko.com/coins/images/1/small/bitcoin.png",
-        "explorer_addr": "https://mempool.space/address/", "explorer_tx": "https://mempool.space/tx/",
-    },
-    {
         "symbol": "SOL", "name": "Solana", "network": "Solana", "coin": "solana",
         "chain": "sol", "decimals": 9,
-        "address": "DDm9iM2Tqf5pmzhzK5tuCiM5KBrzZdv7BEsLur5rtkV6",
+        "address": "PASTE_YOUR_SOL_ADDRESS",
         "icon": "https://assets.coingecko.com/coins/images/4128/small/solana.png",
         "explorer_addr": "https://solscan.io/account/", "explorer_tx": "https://solscan.io/tx/",
     },
@@ -386,6 +380,10 @@ class CryptoBot(commands.Bot):
     async def setup_hook(self):
         self.session = aiohttp.ClientSession()
         self.add_view(RefreshView())
+        if GUILD_ID:
+            g = discord.Object(id=GUILD_ID)
+            self.tree.copy_global_to(guild=g)
+            await self.tree.sync(guild=g)
         await self.tree.sync()
         self.loop.create_task(watcher())
 
