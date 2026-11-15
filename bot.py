@@ -3046,7 +3046,7 @@ async def crypto_daily_loop() -> None:
 # ===========================================================================
 
 PRICES_CHANNEL_ID = 1570047181128212560
-PRICES_VERSION = "2026-11-15"
+PRICES_VERSION = "2026-11-15b"
 BOOST_PRICES = [  # (pack, 1 month, 3 months)
     ("2x", "$0.80", "$1.60"),
     ("8x", "$2.50", "$5.50"),
@@ -3065,17 +3065,18 @@ def tickets_channel_id() -> int | None:
 
 def price_card(kind: str) -> discord.Embed:
     a = "›"
+    dot = E("me_arrow", "➜")
     if kind == "nitro":
         body = (
             f"# {E('me_buy', '💎')} {STORE_NAME} | Nitro\n"
             f"> **Nitro Subscriptions**\n"
-            f"- Discord Nitro (1 Month) {a} **$6.00**"
+            f"{dot} Discord Nitro (1 Month) {a} **$6.00**"
         )
     elif kind == "boosts":
-        lines = [f"# {E('me_rocket', '🚀')} {STORE_NAME} | Boosts", "> **1 Month Boosts**"]
-        lines += [f"- {pack} Boosts {a} **{m1}**" for pack, m1, _ in BOOST_PRICES]
-        lines += ["", "> **3 Month Boosts** · best value"]
-        lines += [f"- {pack} Boosts {a} **{m3}**" for pack, _, m3 in BOOST_PRICES]
+        lines = [f"# {E('me_rocket', '🚀')} {STORE_NAME} | Boosts", f"> {E('me_timer', '⏱️')} **1 Month Boosts**"]
+        lines += [f"{dot} {pack} Boosts {a} **{m1}**" for pack, m1, _ in BOOST_PRICES]
+        lines += ["", f"> {E('me_trophy', '🏆')} **3 Month Boosts** · best value"]
+        lines += [f"{dot} {pack} Boosts {a} **{m3}**" for pack, _, m3 in BOOST_PRICES]
         lines += ["", "-# 2x = Level 1 · 8x = Level 2 · 14x+ = Level 3"]
         body = "\n".join(lines)
     else:
@@ -3085,8 +3086,9 @@ def price_card(kind: str) -> discord.Embed:
             f"{E('me_timer', '⏳')} **Coming soon!** Turn on the Restock or Announcement ping so you don't miss it."
         )
     tickets = tickets_channel_id()
-    body += "\n\nFor orders and more info, " + (f"open a ticket in <#{tickets}>." if tickets else "please open a ticket.")
-    body += f"\nMake sure you've read <#{TOS_CHANNEL_ID}> before buying."
+    if kind != "decos":
+        body += f"\n\n{E('me_ticket', '🎫')} **Open a ticket to buy** in <#{tickets}>"
+    body += f"\n{E('me_rules', '📜')} Read <#{TOS_CHANNEL_ID}> before buying."
     embed = discord.Embed(description=body, colour=COLOUR)
     if bot.user:
         embed.set_thumbnail(url=bot.user.display_avatar.url)
@@ -3097,7 +3099,7 @@ def price_links() -> discord.ui.View:
     view = discord.ui.View()
     tickets = tickets_channel_id()
     if tickets:
-        view.add_item(discord.ui.Button(label="Open a ticket", emoji=server_emoji("me_ticket", "🎫"),
+        view.add_item(discord.ui.Button(label="Open a ticket to buy", emoji=server_emoji("me_ticket", "🎫"),
                                         style=discord.ButtonStyle.link, url=f"https://discord.com/channels/{GUILD_ID}/{tickets}"))
     view.add_item(discord.ui.Button(label="Server TOS", emoji=server_emoji("me_rules", "📜"),
                                     style=discord.ButtonStyle.link, url=f"https://discord.com/channels/{GUILD_ID}/{TOS_CHANNEL_ID}"))
@@ -3136,10 +3138,10 @@ class PricesLayout(discord.ui.LayoutView):
             parts.append(discord.ui.MediaGallery(discord.MediaGalleryItem(media=banner)))
         parts.append(discord.ui.TextDisplay(
             f"## {E('me_offers', '🏷️')} {STORE_NAME} | Prices\n"
-            f"Welcome to **{STORE_NAME}**!\n"
-            "Explore our products and prices through the categories below.\n\n"
-            "Select a category to see prices.\n\n"
-            "Need help? Open a ticket and our team will be happy to help."
+            f"Welcome to **{STORE_NAME}**!\n\n"
+            f"{E('me_folder', '📂')} Pick a category below to see our prices.\n"
+            f"{E('me_ticket', '🎫')} **Open a ticket to buy** in <#{TICKETS_CHANNEL_ID}>\n"
+            f"{E('me_rules', '📜')} Read <#{TOS_CHANNEL_ID}> before buying."
         ))
         row = discord.ui.ActionRow()
         row.add_item(PriceSelect())
