@@ -1520,6 +1520,8 @@ async def on_message(message: discord.Message) -> None:
     key = str(message.author.id)
     store.data["messages"][key] = store.data["messages"].get(key, 0) + 1
     store.dirty = True
+    if message.channel.id == STICKY_VOUCH_CHANNEL_ID and store.data.get("vouch_sticky_on"):
+        schedule_sticky(message.channel)
     await bot.process_commands(message)
 
 
@@ -2752,6 +2754,96 @@ async def info_panel_cmd(interaction: discord.Interaction) -> None:
     await send_info(interaction.channel)
     await interaction.followup.send("✅ Server info posted.", ephemeral=True)
 
+
+
+# ===========================================================================
+# Sticky "how to vouch" message (stays pinned to the bottom of the channel)
+# ===========================================================================
+
+STICKY_VOUCH_CHANNEL_ID = 1570047371679764491
+_sticky_tasks: dict = {}
+
+
+def vouch_sticky_embed() -> discord.Embed:
+    b = "`✦`"
+    embed = discord.Embed(
+        description=(
+            f"# {E('me_trophy', '⭐')} How to Vouch\n"
+            f"Bought from **{STORE_NAME}**? Leave a vouch and help others shop with confidence \U0001f90d\n\n"
+            f"### {E('me_tick', '✅')} Leaving a vouch\n"
+            f"> {b} Type {E('me_arrow', '➜')} **/vouch** anywhere in the server\n"
+            f"> {b} Fill in **who** you bought from, the **product**, the **price** and a **rating** out of 5\n"
+            f"> {b} Add a short **comment** if you'd like — it all posts automatically\n\n"
+            f"### {E('me_no', '⚠️')} The rules\n"
+            f"> {b} Only vouch for a **real order you actually made**\n"
+            f"> {b} **No troll, fake, joke or paid-for vouches** — they get deleted and can get you banned\n"
+            f"> {b} **One** honest vouch per order\n"
+            f"> {b} Keep it genuine and respectful"
+        ),
+        colour=COLOUR,
+    )
+    embed.set_footer(text=f"{STORE_NAME} • Thanks for your support")
+    return embed
+
+
+async def repost_vouch_sticky(channel: discord.abc.Messageable) -> None:
+    old = store.data.get("vouch_sticky_msg")
+    try:
+        new = await channel.send(embed=vouch_sticky_embed())
+    except discord.HTTPException:
+        log.exception("Couldn't post the vouch sticky")
+        return
+    store.data["vouch_sticky_msg"] = new.id
+    store.save()
+    if old:
+        try:
+            msg = await channel.fetch_message(old)
+            await msg.delete()
+        except discord.HTTPException:
+            pass
+
+
+async def _sticky_worker(channel: discord.abc.Messageable) -> None:
+    try:
+        await asyncio.sleep(3)  # batch rapid messages into one repost
+        await repost_vouch_sticky(channel)
+    finally:
+        _sticky_tasks.pop(channel.id, None)
+
+
+def schedule_sticky(channel: discord.abc.Messageable) -> None:
+    if channel.id in _sticky_tasks:
+        return  # a repost is already queued for this burst
+    _sticky_tasks[channel.id] = bot.loop.create_task(_sticky_worker(channel))
+
+
+@bot.tree.command(name="stickyvouch", description="⭐ Post the sticky 'how to vouch' message in this channel (admin)")
+@app_commands.default_permissions(administrator=True)
+@admin_only()
+async def sticky_vouch_cmd(interaction: discord.Interaction) -> None:
+    await interaction.response.defer(ephemeral=True)
+    store.data["vouch_sticky_on"] = True
+    store.save()
+    await repost_vouch_sticky(interaction.channel)
+    await interaction.followup.send(
+        "⭐ Sticky posted. It'll re-stick to the bottom whenever someone chats here.", ephemeral=True)
+
+
+@bot.tree.command(name="stickyvouchoff", description="\U0001f6d1 Stop the sticky 'how to vouch' message (admin)")
+@app_commands.default_permissions(administrator=True)
+@admin_only()
+async def sticky_vouch_off_cmd(interaction: discord.Interaction) -> None:
+    store.data["vouch_sticky_on"] = False
+    old = store.data.get("vouch_sticky_msg")
+    store.data["vouch_sticky_msg"] = None
+    store.save()
+    if old:
+        try:
+            msg = await interaction.channel.fetch_message(old)
+            await msg.delete()
+        except discord.HTTPException:
+            pass
+    await interaction.response.send_message("\U0001f6d1 Sticky turned off.", ephemeral=True)
 
 
 # ===========================================================================
