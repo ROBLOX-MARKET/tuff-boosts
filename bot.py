@@ -2765,24 +2765,14 @@ _sticky_tasks: dict = {}
 
 
 def vouch_sticky_embed() -> discord.Embed:
-    b = "`✦`"
     embed = discord.Embed(
         description=(
-            f"# {E('me_trophy', '⭐')} How to Vouch\n"
-            f"Bought from **{STORE_NAME}**? Leave a vouch and help others shop with confidence \U0001f90d\n\n"
-            f"### {E('me_tick', '✅')} Leaving a vouch\n"
-            f"> {b} Type {E('me_arrow', '➜')} **/vouch** anywhere in the server\n"
-            f"> {b} Fill in **who** you bought from, the **product**, the **price** and a **rating** out of 5\n"
-            f"> {b} Add a short **comment** if you'd like — it all posts automatically\n\n"
-            f"### {E('me_no', '⚠️')} The rules\n"
-            f"> {b} Only vouch for a **real order you actually made**\n"
-            f"> {b} **No troll, fake, joke or paid-for vouches** — they get deleted and can get you banned\n"
-            f"> {b} **One** honest vouch per order\n"
-            f"> {b} Keep it genuine and respectful"
+            f"### {E('me_trophy', '⭐')} How to Vouch\n"
+            f"Use {E('me_arrow', '➜')} **/vouch** — pick who you bought from, the product, price & rating.\n"
+            f"{E('me_no', '🚫')} Real orders only — no troll, fake or paid vouches *(deleted + ban)*."
         ),
         colour=COLOUR,
     )
-    embed.set_footer(text=f"{STORE_NAME} • Thanks for your support")
     return embed
 
 
