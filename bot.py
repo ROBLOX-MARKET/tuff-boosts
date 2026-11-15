@@ -3046,7 +3046,7 @@ async def crypto_daily_loop() -> None:
 # ===========================================================================
 
 PRICES_CHANNEL_ID = 1570047181128212560
-PRICES_VERSION = "2026-11-15b"
+PRICES_VERSION = "2026-11-15c"
 BOOST_PRICES = [  # (pack, 1 month, 3 months)
     ("2x", "$0.80", "$1.60"),
     ("8x", "$2.50", "$5.50"),
@@ -3142,8 +3142,8 @@ class PricesLayout(discord.ui.LayoutView):
             f"## {E('me_offers', '🏷️')} {STORE_NAME} | Prices\n"
             f"Welcome to **{STORE_NAME}**!\n\n"
             f"{E('me_folder', '📂')} Pick a category below to see our prices.\n"
-            f"{E('me_ticket', '🎫')} **Open a ticket to buy** in <#{TICKETS_CHANNEL_ID}>\n"
-            f"{E('me_rules', '📜')} Read <#{TOS_CHANNEL_ID}> before buying."
+            f"{E('me_ticket', '🎫')} **[Click here to open a ticket and buy](https://discord.com/channels/{GUILD_ID}/{TICKETS_CHANNEL_ID})**\n"
+            f"{E('me_rules', '📜')} [Click here to read the TOS](https://discord.com/channels/{GUILD_ID}/{TOS_CHANNEL_ID}) before buying"
         ))
         row = discord.ui.ActionRow()
         row.add_item(PriceSelect())
