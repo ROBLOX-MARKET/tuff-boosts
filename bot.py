@@ -51,13 +51,6 @@ USDT_BSC = "0x55d398326f99059fF775485246999027B3197955"   # USDT contract on BNB
 
 WALLETS = [
     {
-        "symbol": "USDC", "name": "USDC", "network": "Ethereum", "coin": "usd-coin",
-        "chain": "token", "evm": "eth", "contract": USDC_ETH, "decimals": 6,
-        "address": "0x8B3549061FD38D34810971f8D8A33D62966cF614",
-        "icon": "https://assets.coingecko.com/coins/images/6319/small/usdc.png",
-        "explorer_addr": "https://etherscan.io/address/", "explorer_tx": "https://etherscan.io/tx/",
-    },
-    {
         "symbol": "USDT", "name": "USDT", "network": "BNB Smart Chain (BEP20)", "coin": "tether",
         "chain": "token", "evm": "bsc", "contract": USDT_BSC, "decimals": 18,
         "address": "0x8B3549061FD38D34810971f8D8A33D62966cF614",
@@ -70,6 +63,13 @@ WALLETS = [
         "address": "LTQsGfYiTR7wpfcuR8SsMxFqEbfp58s5o9",
         "icon": "https://assets.coingecko.com/coins/images/2/small/litecoin.png",
         "explorer_addr": "https://litecoinspace.org/address/", "explorer_tx": "https://litecoinspace.org/tx/",
+    },
+    {
+        "symbol": "BTC", "name": "Bitcoin", "network": "Bitcoin", "coin": "bitcoin",
+        "chain": "btc", "decimals": 8,
+        "address": "bc1qvsdxjfrgaf8573ka9k748fmnk3uhjupp0s2hk9",
+        "icon": "https://assets.coingecko.com/coins/images/1/small/bitcoin.png",
+        "explorer_addr": "https://mempool.space/address/", "explorer_tx": "https://mempool.space/tx/",
     },
     {
         "symbol": "SOL", "name": "Solana", "network": "Solana", "coin": "solana",
@@ -164,14 +164,30 @@ def usd(amount: float, w: dict) -> str:
 # ===========================================================================
 # Balances
 # ===========================================================================
+ESPLORA = {"ltc": "https://litecoinspace.org/api", "btc": "https://mempool.space/api"}
+
+
+async def _utxo_balance(session, w: dict) -> float | None:
+    net = w["chain"]
+    # primary: BlockCypher
+    d = await get_json(session, f"https://api.blockcypher.com/v1/{net}/main/addrs/{w['address']}/balance")
+    if d and "final_balance" in d:
+        return d["final_balance"] / 1e8
+    # fallback: Esplora (litecoinspace / mempool.space)
+    e = await get_json(session, f"{ESPLORA[net]}/address/{w['address']}")
+    if isinstance(e, dict) and "chain_stats" in e:
+        cs = e.get("chain_stats", {})
+        ms = e.get("mempool_stats", {})
+        sats = (cs.get("funded_txo_sum", 0) - cs.get("spent_txo_sum", 0)
+                + ms.get("funded_txo_sum", 0) - ms.get("spent_txo_sum", 0))
+        return sats / 1e8
+    return None
+
+
 async def get_balance(session, w: dict) -> float | None:
     try:
-        if w["chain"] == "ltc":
-            d = await get_json(session, f"https://api.blockcypher.com/v1/ltc/main/addrs/{w['address']}/balance")
-            return (d.get("final_balance", 0) / 1e8) if d else None
-        if w["chain"] == "btc":
-            d = await get_json(session, f"https://api.blockcypher.com/v1/btc/main/addrs/{w['address']}/balance")
-            return (d.get("final_balance", 0) / 1e8) if d else None
+        if w["chain"] in ("ltc", "btc"):
+            return await _utxo_balance(session, w)
         if w["chain"] == "sol":
             res = await rpc(session, SOL_RPC, "getBalance", [w["address"]])
             return (res.get("value", 0) / 1e9) if isinstance(res, dict) else None

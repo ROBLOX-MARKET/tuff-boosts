@@ -91,7 +91,21 @@ def coin_icon(symbol: str, d: int) -> Image.Image:
         return im
     bg = _COIN_BG.get(sym, (90, 94, 104))
     dr.ellipse([0, 0, s - 1, s - 1], fill=bg + (255,))
-    glyph = {"USDC": "$", "USDT": "₮", "LTC": "Ł", "BTC": "₿", "ETH": "Ξ", "BNB": "B"}.get(sym, sym[:1])
+    if sym == "BTC":
+        # draw ₿ (B with two vertical strokes) — the font's ₿ glyph is a placeholder box
+        gf = _glyph_font(int(s * 0.60))
+        tmp = Image.new("L", (s, s), 0)
+        ImageDraw.Draw(tmp).text((s / 2, s / 2 - s * 0.03), "B", font=gf, fill=255, anchor="mm")
+        bb = tmp.getbbox()
+        dr.bitmap((0, 0), tmp, fill=(255, 255, 255, 255))
+        if bb:
+            w = bb[2] - bb[0]
+            barw = max(2, int(w * 0.14))
+            for gx in (bb[0] + int(w * 0.30), bb[0] + int(w * 0.56)):
+                dr.rounded_rectangle([gx - barw // 2, bb[1] - int(s * 0.10), gx + barw // 2, bb[3] + int(s * 0.10)],
+                                     radius=barw // 2, fill=(255, 255, 255, 255))
+        return im
+    glyph = {"USDC": "$", "USDT": "₮", "LTC": "Ł", "ETH": "Ξ", "BNB": "B"}.get(sym, sym[:1])
     gf = _glyph_font(int(s * 0.62))
     dr.text((s / 2, s / 2 - s * 0.04), glyph, font=gf, fill=(255, 255, 255, 255), anchor="mm")
     if sym == "USDC":  # ring like the real logo
