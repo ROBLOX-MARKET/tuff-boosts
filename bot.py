@@ -220,6 +220,7 @@ class MEBot(commands.Bot):
         self.add_view(GiveawayView())
         self.add_view(PingRolesView())
         self.add_view(LegitLayout())
+        self.add_view(PricesLayout())
         self.add_view(TosLayout())
         self.add_view(InfoLayout())
         self.add_view(TagCheckView())
@@ -257,6 +258,7 @@ class MEBot(commands.Bot):
         await set_avatar()
         await post_roles_panel_once()
         await post_legit_panel_once()
+        await post_prices_once()
         await post_tos_once()
         await post_info_once()
         self.loop.create_task(tag_sync_loop())
@@ -3036,6 +3038,159 @@ async def crypto_daily_loop() -> None:
         except Exception:
             log.exception("Daily crypto report failed.")
         await asyncio.sleep(300)
+
+
+
+# ===========================================================================
+# Prices panel: pick Nitro / Boosts / Decorations, see prices privately
+# ===========================================================================
+
+PRICES_CHANNEL_ID = 1570047181128212560
+PRICES_VERSION = "2026-11-15"
+BOOST_PRICES = [  # (pack, 1 month, 3 months)
+    ("2x", "$0.80", "$1.60"),
+    ("8x", "$2.50", "$5.50"),
+    ("14x", "$3.75", "$8.50"),
+    ("20x", "$5.00", "$12.00"),
+    ("30x", "$7.00", "$17.50"),
+]
+
+
+def tickets_channel_id() -> int | None:
+    guild = bot.get_guild(GUILD_ID)
+    if guild is None:
+        return None
+    ch = discord.utils.find(lambda c: "tickets" in c.name.lower(), guild.text_channels)
+    return ch.id if ch else None
+
+
+def price_card(kind: str) -> discord.Embed:
+    a = "›"
+    if kind == "nitro":
+        body = (
+            f"# {E('me_buy', '💎')} {STORE_NAME} | Nitro\n"
+            f"> **Nitro Subscriptions**\n"
+            f"- Discord Nitro (1 Month) {a} **$6.00**"
+        )
+    elif kind == "boosts":
+        lines = [f"# {E('me_rocket', '🚀')} {STORE_NAME} | Boosts", "> **1 Month Boosts**"]
+        lines += [f"- {pack} Boosts {a} **{m1}**" for pack, m1, _ in BOOST_PRICES]
+        lines += ["", "> **3 Month Boosts** · best value"]
+        lines += [f"- {pack} Boosts {a} **{m3}**" for pack, _, m3 in BOOST_PRICES]
+        lines += ["", "-# 2x = Level 1 · 8x = Level 2 · 14x+ = Level 3"]
+        body = "\n".join(lines)
+    else:
+        body = (
+            f"# {E('me_offers', '🎨')} {STORE_NAME} | Decorations\n"
+            f"> **Profile Decorations**\n"
+            f"{E('me_timer', '⏳')} **Coming soon!** Turn on the Restock or Announcement ping so you don't miss it."
+        )
+    tickets = tickets_channel_id()
+    body += "\n\nFor orders and more info, " + (f"open a ticket in <#{tickets}>." if tickets else "please open a ticket.")
+    body += f"\nMake sure you've read <#{TOS_CHANNEL_ID}> before buying."
+    embed = discord.Embed(description=body, colour=COLOUR)
+    if bot.user:
+        embed.set_thumbnail(url=bot.user.display_avatar.url)
+    return embed
+
+
+def price_links() -> discord.ui.View:
+    view = discord.ui.View()
+    tickets = tickets_channel_id()
+    if tickets:
+        view.add_item(discord.ui.Button(label="Open a ticket", emoji=server_emoji("me_ticket", "🎫"),
+                                        style=discord.ButtonStyle.link, url=f"https://discord.com/channels/{GUILD_ID}/{tickets}"))
+    view.add_item(discord.ui.Button(label="Server TOS", emoji=server_emoji("me_rules", "📜"),
+                                    style=discord.ButtonStyle.link, url=f"https://discord.com/channels/{GUILD_ID}/{TOS_CHANNEL_ID}"))
+    return view
+
+
+class PriceSelect(discord.ui.Select):
+    def __init__(self):
+        super().__init__(
+            custom_id="me:prices",
+            placeholder="Select Product",
+            options=[
+                discord.SelectOption(label="Nitro", value="nitro", emoji=server_emoji("me_buy", "💎"),
+                                     description="See prices for this category."),
+                discord.SelectOption(label="Boosts", value="boosts", emoji=server_emoji("me_rocket", "🚀"),
+                                     description="See prices for this category."),
+                discord.SelectOption(label="Decorations", value="decos", emoji=server_emoji("me_offers", "🎨"),
+                                     description="Coming soon."),
+            ],
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        await interaction.response.send_message(embed=price_card(self.values[0]), view=price_links(), ephemeral=True)
+        try:  # reset the dropdown so the same option can be picked again
+            ref = (store.data.get("prices_post") or {}).get("banner")
+            await interaction.message.edit(view=PricesLayout(ref))
+        except discord.HTTPException:
+            pass
+
+
+class PricesLayout(discord.ui.LayoutView):
+    def __init__(self, banner: str | None = None):
+        super().__init__(timeout=None)
+        parts: list[discord.ui.Item] = []
+        if banner:
+            parts.append(discord.ui.MediaGallery(discord.MediaGalleryItem(media=banner)))
+        parts.append(discord.ui.TextDisplay(
+            f"## {E('me_offers', '🏷️')} {STORE_NAME} | Prices\n"
+            f"Welcome to **{STORE_NAME}**!\n"
+            "Explore our products and prices through the categories below.\n\n"
+            "Select a category to see prices.\n\n"
+            "Need help? Open a ticket and our team will be happy to help."
+        ))
+        row = discord.ui.ActionRow()
+        row.add_item(PriceSelect())
+        parts.append(row)
+        parts.append(discord.ui.Separator())
+        parts.append(discord.ui.TextDisplay(f"-# {E('me_respect', '🤍')} {STORE_NAME}"))
+        self.add_item(discord.ui.Container(*parts, accent_color=COLOUR))
+
+
+async def send_prices(channel: discord.abc.Messageable) -> discord.Message:
+    if BANNER_FILE.exists():
+        ref = f"attachment://{BANNER_FILE.name}"
+        message = await channel.send(view=PricesLayout(ref), file=discord.File(BANNER_FILE))
+    else:
+        ref = BANNER_URL or None
+        message = await channel.send(view=PricesLayout(ref))
+    store.data["prices_post"] = {"channel": channel.id, "message": message.id, "banner": ref, "version": PRICES_VERSION}
+    store.save()
+    return message
+
+
+async def post_prices_once() -> None:
+    saved = store.data.get("prices_post")
+    channel = bot.get_channel(PRICES_CHANNEL_ID)
+    if channel is None:
+        return
+    if saved:
+        try:
+            message = await bot.get_channel(saved["channel"]).fetch_message(saved["message"])
+            if saved.get("version") == PRICES_VERSION:
+                return
+            await message.delete()
+        except (discord.NotFound, AttributeError):
+            pass
+        except discord.HTTPException:
+            return
+    try:
+        await send_prices(channel)
+        log.info("Posted the prices panel")
+    except discord.HTTPException:
+        log.exception("Couldn't post the prices panel.")
+
+
+@bot.tree.command(name="pricespanel", description="🏷️ Post the prices panel in this channel (admin)")
+@app_commands.default_permissions(administrator=True)
+@admin_only()
+async def prices_panel_cmd(interaction: discord.Interaction) -> None:
+    await interaction.response.defer(ephemeral=True)
+    await send_prices(interaction.channel)
+    await interaction.followup.send("✅ Prices panel posted.", ephemeral=True)
 
 
 # ===========================================================================
