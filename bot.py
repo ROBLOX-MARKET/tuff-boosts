@@ -2363,6 +2363,27 @@ class LegitTick(discord.ui.Button):
         await interaction.followup.send(note, ephemeral=True)
 
 
+class LegitWhoButton(discord.ui.Button):
+    def __init__(self):
+        super().__init__(label="See reactions", emoji=server_emoji("me_users", "👥"),
+                         style=discord.ButtonStyle.secondary, custom_id="me:legit_who")
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        lines = [f"### {E('me_users', '👥')} Who ticked who"]
+        for key, (name, uid) in LEGIT_PEOPLE.items():
+            voters = legit_votes(key)
+            lines.append(f"\n**{E('me_crown', '👑')} {name}** · {len(voters)} tick{'s' if len(voters) != 1 else ''}")
+            if voters:
+                shown = " ".join(f"<@{v}>" for v in voters[:60])
+                more = f" *+{len(voters) - 60} more*" if len(voters) > 60 else ""
+                lines.append(shown + more)
+            else:
+                lines.append("-# No ticks yet.")
+        embed = discord.Embed(description=clip("\n".join(lines), 4000), colour=COLOUR)
+        await interaction.response.send_message(embed=embed, ephemeral=True,
+                                                allowed_mentions=discord.AllowedMentions.none())
+
+
 class LegitLayout(discord.ui.LayoutView):
     def __init__(self):
         super().__init__(timeout=None)
@@ -2382,6 +2403,9 @@ class LegitLayout(discord.ui.LayoutView):
             if i < len(LEGIT_PEOPLE) - 1:
                 parts.append(discord.ui.Separator())
         parts.append(discord.ui.Separator())
+        who = discord.ui.ActionRow()
+        who.add_item(LegitWhoButton())
+        parts.append(who)
         parts.append(discord.ui.TextDisplay(
             f"-# {E('me_respect', '🤍')} Every tick helps new customers trust us. Click again to remove yours."
         ))
