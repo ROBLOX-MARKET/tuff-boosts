@@ -1746,9 +1746,68 @@ async def vouch_cmd(
     target = bot.get_channel(cfg("vouch_channel")) if cfg("vouch_channel") else None
     if target is None or target.id == interaction.channel.id:
         await interaction.response.send_message(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+        posted = await interaction.original_response()
     else:
-        await target.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+        posted = await target.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
         await reply(interaction, f"⭐ Thanks! Your vouch was posted in {target.mention}.")
+    store.data["vouches"][-1]["msg"] = [posted.channel.id, posted.id]
+    store.save()
+
+@bot.tree.command(name="delvouch", description="🗑️ Delete a vouch by its number (admin)")
+@app_commands.default_permissions(administrator=True)
+@admin_only()
+@app_commands.describe(number="The Vouch Nº to delete", reason="Why (optional, shown in the log)")
+async def delvouch(interaction: discord.Interaction, number: int, reason: str = "No reason given") -> None:
+    await interaction.response.defer(ephemeral=True)
+    vouches = store.data.setdefault("vouches", [])
+    match = next((v for v in vouches if v.get("id") == number), None)
+    if match is None:
+        return await interaction.followup.send(f"{E('me_no', '❌')} There's no vouch Nº {number}.", ephemeral=True)
+
+    # Delete the posted message: use the saved spot, otherwise search the vouch channels for it.
+    deleted_msg = False
+    if match.get("msg"):
+        ch = bot.get_channel(match["msg"][0])
+        if ch:
+            try:
+                await ch.get_partial_message(match["msg"][1]).delete()
+                deleted_msg = True
+            except discord.HTTPException:
+                pass
+    if not deleted_msg:
+        places = {c for c in (cfg("vouch_channel"), LEGIT_CHANNEL_ID, interaction.channel.id) if c}
+        for cid in places:
+            ch = bot.get_channel(cid)
+            if ch is None:
+                continue
+            try:
+                async for m in ch.history(limit=1000):
+                    if m.author.id != bot.user.id or not m.embeds:
+                        continue
+                    fields = {f.name: f.value for f in m.embeds[0].fields}
+                    if fields.get("Vouch Nº:") == str(number):
+                        await m.delete()
+                        deleted_msg = True
+                        break
+            except discord.HTTPException:
+                continue
+            if deleted_msg:
+                break
+
+    vouches.remove(match)
+    store.save()
+    text = f"🗑️ Deleted vouch Nº {number}" + (" and its message." if deleted_msg else ". I couldn't find its message, so delete that by hand if it's still up.")
+    await interaction.followup.send(text, ephemeral=True)
+
+    log_embed = discord.Embed(title="🗑️ Vouch deleted", colour=discord.Colour.red(), timestamp=now())
+    log_embed.add_field(name="Vouch Nº", value=str(number), inline=True)
+    log_embed.add_field(name="Deleted by", value=interaction.user.mention, inline=True)
+    log_embed.add_field(name="Was by", value=f"<@{match['by']}>", inline=True)
+    log_embed.add_field(name="Product", value=clip(match.get("product", "—"), 200), inline=True)
+    log_embed.add_field(name="Rating", value=f"{match.get('rating', '?')}/5", inline=True)
+    log_embed.add_field(name="Reason", value=clip(reason, 500), inline=False)
+    await bot.log_to(cfg("mod_log_channel"), log_embed)
+
 
 
 def vouches_page(user: discord.abc.User, page: int) -> tuple[discord.Embed, int]:
