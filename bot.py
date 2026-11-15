@@ -3858,9 +3858,11 @@ async def start_dashboard() -> None:
     if not SERVER_PORT:
         log.warning("No SERVER_PORT set — dashboard not started.")
         return
+    env_pw = os.getenv("DASH_PASSWORD", "").strip()
     ctx = {
         "store_name": STORE_NAME,
-        "password": dash_password,
+        "open": not env_pw,            # no DASH_PASSWORD env => open dashboard (no login)
+        "password": lambda: env_pw,
         "overview": dash_overview,
         "channels": dash_channels,
         "get_prices": get_prices,
@@ -3869,9 +3871,10 @@ async def start_dashboard() -> None:
     }
     try:
         await dashboard.start(ctx, SERVER_PORT)
-        log.info("Dashboard running on port %s (password: set DASH_PASSWORD or see below)", SERVER_PORT)
-        if not os.getenv("DASH_PASSWORD"):
-            log.info("Dashboard password: %s", dash_password())
+        if env_pw:
+            log.info("Dashboard running on port %s (password protected)", SERVER_PORT)
+        else:
+            log.info("Dashboard running on port %s (open, no password — set DASH_PASSWORD to lock it)", SERVER_PORT)
     except Exception:  # noqa: BLE001
         log.exception("Couldn't start the dashboard")
 

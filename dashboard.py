@@ -7,8 +7,11 @@ from aiohttp import web
 def make_app(ctx) -> web.Application:
     app = web.Application()
     sessions: set[str] = set()
+    open_mode = bool(ctx.get("open"))
 
     def authed(req) -> bool:
+        if open_mode:
+            return True
         tok = req.headers.get("X-Dash-Token") or req.cookies.get("dash") or req.query.get("t")
         return tok in sessions
 
@@ -16,7 +19,8 @@ def make_app(ctx) -> web.Application:
         return None if authed(req) else web.json_response({"error": "auth"}, status=401)
 
     async def index(req):
-        return web.Response(text=PAGE.replace("{{STORE}}", ctx["store_name"]), content_type="text/html")
+        html = PAGE.replace("{{STORE}}", ctx["store_name"]).replace("{{OPEN}}", "true" if open_mode else "false")
+        return web.Response(text=html, content_type="text/html")
 
     async def login(req):
         data = await req.post()
@@ -235,7 +239,9 @@ async function savePrices(){
   const r=await(await api('/api/prices',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({nitro:$('#nitro').value.trim(),boosts,decorations:$('#decos').value.trim()})})).json();
   m.textContent=r.ok?'✅ Saved — prices panel updated.':'❌ failed';if(!r.ok)m.className='msg err';
 }
-// auto-skip login if a saved token still works
-if(TOKEN){fetch('/api/overview',{headers:{'X-Dash-Token':TOKEN}}).then(r=>{if(r.ok){$('#login').classList.add('hide');$('#app').classList.remove('hide');boot();}});}
+// open mode = no password; otherwise auto-skip login if a saved token still works
+const OPEN={{OPEN}};
+if(OPEN){$('#login').classList.add('hide');$('#app').classList.remove('hide');boot();}
+else if(TOKEN){fetch('/api/overview',{headers:{'X-Dash-Token':TOKEN}}).then(r=>{if(r.ok){$('#login').classList.add('hide');$('#app').classList.remove('hide');boot();}});}
 </script>
 </body></html>"""
