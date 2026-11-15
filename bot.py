@@ -3070,7 +3070,7 @@ def price_card(kind: str) -> discord.Embed:
         body = (
             f"# {E('me_buy', '💎')} {STORE_NAME} | Nitro\n"
             f"> **Nitro Subscriptions**\n"
-            f"{dot} Discord Nitro (1 Month) {a} **$6.00**"
+            f"{dot} Nitro Premium (1 Month) {a} **$6.00**"
         )
     elif kind == "boosts":
         lines = [f"# {E('me_rocket', '🚀')} {STORE_NAME} | Boosts", f"> {E('me_timer', '⏱️')} **1 Month Boosts**"]
