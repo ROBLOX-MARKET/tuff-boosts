@@ -11,6 +11,7 @@ import logging
 import os
 import random
 import re
+import secrets
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -19,6 +20,8 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 from dotenv import load_dotenv
+
+import dashboard
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_FILE = BASE_DIR / "mod_data.json"
@@ -240,6 +243,7 @@ class MEBot(commands.Bot):
             )
         self.loop.create_task(save_loop())
         self.loop.create_task(giveaway_loop())
+        self.loop.create_task(start_dashboard())
 
     async def on_ready(self) -> None:
         log.info("Logged in as %s", self.user)
@@ -3229,6 +3233,23 @@ BOOST_PRICES = [  # (pack, 1 month, 3 months)
 ]
 
 
+def get_prices() -> dict:
+    """Editable prices (via the dashboard), falling back to the defaults above."""
+    p = store.data.get("prices")
+    if not isinstance(p, dict):
+        p = {}
+    return {
+        "nitro": p.get("nitro", "$6.00"),
+        "boosts": p.get("boosts") or [list(x) for x in BOOST_PRICES],
+        "decorations": p.get("decorations", ""),  # empty = "coming soon"
+    }
+
+
+def set_prices(nitro: str, boosts: list, decorations: str) -> None:
+    store.data["prices"] = {"nitro": nitro, "boosts": boosts, "decorations": decorations}
+    store.save()
+
+
 TICKETS_CHANNEL_ID = 1570047964548829194
 
 
@@ -3239,24 +3260,28 @@ def tickets_channel_id() -> int | None:
 def price_card(kind: str) -> discord.Embed:
     a = "›"
     dot = E("me_arrow", "➜")
+    pr = get_prices()
     if kind == "nitro":
         body = (
             f"# {E('me_buy', '💎')} {STORE_NAME} | Nitro\n"
             f"> **Nitro Subscriptions**\n"
-            f"{dot} Nitro Premium (1 Month) {a} **$6.00**"
+            f"{dot} Nitro Premium (1 Month) {a} **{pr['nitro']}**"
         )
     elif kind == "boosts":
+        boosts = pr["boosts"]
         lines = [f"# {E('me_rocket', '🚀')} {STORE_NAME} | Boosts", f"> {E('me_timer', '⏱️')} **1 Month Boosts**"]
-        lines += [f"{dot} {pack} Boosts {a} **{m1}**" for pack, m1, _ in BOOST_PRICES]
+        lines += [f"{dot} {row[0]} Boosts {a} **{row[1]}**" for row in boosts]
         lines += ["", f"> {E('me_trophy', '🏆')} **3 Month Boosts** · best value"]
-        lines += [f"{dot} {pack} Boosts {a} **{m3}**" for pack, _, m3 in BOOST_PRICES]
+        lines += [f"{dot} {row[0]} Boosts {a} **{row[2]}**" for row in boosts]
         lines += ["", "-# 2x = Level 1 · 8x = Level 2 · 14x+ = Level 3"]
         body = "\n".join(lines)
     else:
+        decos = pr.get("decorations") or ""
+        detail = decos if decos.strip() else "**Coming soon!** Turn on the Restock or Announcement ping so you don't miss it."
         body = (
             f"# {E('me_offers', '🎨')} {STORE_NAME} | Decorations\n"
             f"> **Profile Decorations**\n"
-            f"{E('me_timer', '⏳')} **Coming soon!** Turn on the Restock or Announcement ping so you don't miss it."
+            f"{E('me_timer', '⏳')} {detail}"
         )
     tickets = f"https://discord.com/channels/{GUILD_ID}/{tickets_channel_id()}"
     tos = f"https://discord.com/channels/{GUILD_ID}/{TOS_CHANNEL_ID}"
@@ -3719,6 +3744,137 @@ async def giveaway_reroll(interaction: discord.Interaction, message_id: str, win
 
 
 # ===========================================================================
+# Web dashboard (served on SERVER_PORT) — owner-only, password protected
+# ===========================================================================
+
+SERVER_PORT = int(os.getenv("SERVER_PORT", "0") or "0")
+
+
+def dash_password() -> str:
+    pw = os.getenv("DASH_PASSWORD", "").strip()
+    if pw:
+        return pw
+    pw = store.data.get("dash_password")
+    if not pw:
+        pw = secrets.token_urlsafe(9)
+        store.data["dash_password"] = pw
+        store.save()
+    return pw
+
+
+async def send_ticket(channel: discord.abc.Messageable) -> discord.Message:
+    if BANNER_FILE.exists():
+        ref = f"attachment://{BANNER_FILE.name}"
+        message = await channel.send(view=build_panel(ref), file=discord.File(BANNER_FILE))
+    elif BANNER_URL:
+        ref = BANNER_URL
+        message = await channel.send(view=build_panel(ref))
+    else:
+        ref = None
+        message = await channel.send(view=build_panel(None))
+    store.data["panels"][str(message.id)] = ref
+    store.save()
+    return message
+
+
+_PANEL_SENDERS = {
+    "ticket": "send_ticket", "prices": "send_prices", "payments": "send_payments",
+    "tos": "send_tos", "info": "send_info", "roles": "send_roles_panel", "legit": "send_legit_panel",
+}
+
+
+async def dash_post_panel(panel: str, channel_id: int) -> dict:
+    fn = globals().get(_PANEL_SENDERS.get(panel, ""))
+    if fn is None:
+        return {"ok": False, "error": "unknown panel"}
+    ch = bot.get_channel(channel_id)
+    if ch is None:
+        return {"ok": False, "error": "I can't see that channel"}
+    try:
+        msg = await fn(ch)
+        return {"ok": True, "message": str(getattr(msg, "id", ""))}
+    except discord.Forbidden:
+        return {"ok": False, "error": "I don't have permission to post there"}
+    except Exception as exc:  # noqa: BLE001
+        log.exception("Dashboard panel post failed")
+        return {"ok": False, "error": str(exc)}
+
+
+async def dash_set_prices(body: dict) -> None:
+    nitro = str(body.get("nitro") or "$6.00")
+    boosts = [[str(r[0]), str(r[1]), str(r[2])] for r in (body.get("boosts") or []) if len(r) >= 3 and r[0]]
+    decorations = str(body.get("decorations") or "")
+    set_prices(nitro, boosts, decorations)
+    saved = store.data.get("prices_post")
+    if saved and saved.get("channel"):
+        ch = bot.get_channel(saved["channel"])
+        if ch is not None:
+            try:
+                old = saved.get("message")
+                await send_prices(ch)
+                if old:
+                    try:
+                        msg = await ch.fetch_message(old)
+                        await msg.delete()
+                    except discord.HTTPException:
+                        pass
+            except discord.HTTPException:
+                log.exception("Couldn't repost prices panel from dashboard")
+
+
+def dash_channels() -> list[dict]:
+    g = bot.get_guild(GUILD_ID)
+    if g is None:
+        return []
+    return [{"id": str(c.id), "name": c.name} for c in g.text_channels]
+
+
+def dash_overview() -> dict:
+    g = bot.get_guild(GUILD_ID)
+    d = store.data
+    keys = d.get("keys", {})
+    key_count = sum(len(v) for v in keys.values()) if isinstance(keys, dict) else 0
+    return {
+        "bot": str(bot.user) if bot.user else "—",
+        "guild": g.name if g else "—",
+        "members": g.member_count if g else 0,
+        "stats": {
+            "Tickets opened": d.get("ticket_count", 0),
+            "Sales logged": len(d.get("sales", [])),
+            "Vouches": len(d.get("vouches", [])),
+            "Mod cases": d.get("case_count", 0),
+            "Boost keys": key_count,
+            "Inviters tracked": len(d.get("invites", {})),
+        },
+        "channels": {
+            "Tickets": TICKETS_CHANNEL_ID, "Prices": PRICES_CHANNEL_ID, "Payments": PAYMENTS_CHANNEL_ID,
+            "TOS": TOS_CHANNEL_ID, "Info": INFO_CHANNEL_ID, "Roles": ROLES_CHANNEL_ID,
+            "Legit": LEGIT_CHANNEL_ID, "Vouch": STICKY_VOUCH_CHANNEL_ID,
+        },
+    }
+
+
+async def start_dashboard() -> None:
+    if not SERVER_PORT:
+        log.warning("No SERVER_PORT set — dashboard not started.")
+        return
+    ctx = {
+        "store_name": STORE_NAME,
+        "password": dash_password,
+        "overview": dash_overview,
+        "channels": dash_channels,
+        "get_prices": get_prices,
+        "set_prices": dash_set_prices,
+        "post_panel": dash_post_panel,
+    }
+    try:
+        await dashboard.start(ctx, SERVER_PORT)
+        log.info("Dashboard running on port %s (password: set DASH_PASSWORD or see below)", SERVER_PORT)
+        if not os.getenv("DASH_PASSWORD"):
+            log.info("Dashboard password: %s", dash_password())
+    except Exception:  # noqa: BLE001
+        log.exception("Couldn't start the dashboard")
+
 
 if __name__ == "__main__":
     bot.run(BOT_TOKEN, log_handler=None)
