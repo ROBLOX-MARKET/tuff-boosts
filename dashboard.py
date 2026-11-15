@@ -20,7 +20,8 @@ def make_app(ctx) -> web.Application:
 
     async def index(req):
         html = PAGE.replace("{{STORE}}", ctx["store_name"]).replace("{{OPEN}}", "true" if open_mode else "false")
-        return web.Response(text=html, content_type="text/html")
+        return web.Response(text=html, content_type="text/html",
+                            headers={"Cache-Control": "no-store, no-cache, must-revalidate", "Pragma": "no-cache"})
 
     async def login(req):
         data = await req.post()
