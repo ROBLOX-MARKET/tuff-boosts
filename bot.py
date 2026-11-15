@@ -1753,18 +1753,9 @@ async def vouch_cmd(
     store.data["vouches"][-1]["msg"] = [posted.channel.id, posted.id]
     store.save()
 
-@bot.tree.command(name="delvouch", description="🗑️ Delete a vouch by its number (admin)")
-@app_commands.default_permissions(administrator=True)
-@admin_only()
-@app_commands.describe(number="The Vouch Nº to delete", reason="Why (optional, shown in the log)")
-async def delvouch(interaction: discord.Interaction, number: int, reason: str = "No reason given") -> None:
-    await interaction.response.defer(ephemeral=True)
-    vouches = store.data.setdefault("vouches", [])
-    match = next((v for v in vouches if v.get("id") == number), None)
-    if match is None:
-        return await interaction.followup.send(f"{E('me_no', '❌')} There's no vouch Nº {number}.", ephemeral=True)
-
-    # Delete the posted message: use the saved spot, otherwise search the vouch channels for it.
+async def delete_vouch(match: dict, actor: discord.abc.User, reason: str, here: discord.abc.Messageable | None) -> bool:
+    """Remove a vouch from the records and delete its message. Returns True if the message was found."""
+    number = match.get("id")
     deleted_msg = False
     if match.get("msg"):
         ch = bot.get_channel(match["msg"][0])
@@ -1775,7 +1766,7 @@ async def delvouch(interaction: discord.Interaction, number: int, reason: str = 
             except discord.HTTPException:
                 pass
     if not deleted_msg:
-        places = {c for c in (cfg("vouch_channel"), LEGIT_CHANNEL_ID, interaction.channel.id) if c}
+        places = {c for c in (cfg("vouch_channel"), LEGIT_CHANNEL_ID, getattr(here, "id", None)) if c}
         for cid in places:
             ch = bot.get_channel(cid)
             if ch is None:
@@ -1793,21 +1784,141 @@ async def delvouch(interaction: discord.Interaction, number: int, reason: str = 
                 continue
             if deleted_msg:
                 break
-
-    vouches.remove(match)
-    store.save()
-    text = f"🗑️ Deleted vouch Nº {number}" + (" and its message." if deleted_msg else ". I couldn't find its message, so delete that by hand if it's still up.")
-    await interaction.followup.send(text, ephemeral=True)
+    vouches = store.data.setdefault("vouches", [])
+    if match in vouches:
+        vouches.remove(match)
+        store.save()
 
     log_embed = discord.Embed(title="🗑️ Vouch deleted", colour=discord.Colour.red(), timestamp=now())
     log_embed.add_field(name="Vouch Nº", value=str(number), inline=True)
-    log_embed.add_field(name="Deleted by", value=interaction.user.mention, inline=True)
+    log_embed.add_field(name="Deleted by", value=actor.mention, inline=True)
     log_embed.add_field(name="Was by", value=f"<@{match['by']}>", inline=True)
     log_embed.add_field(name="Product", value=clip(match.get("product", "—"), 200), inline=True)
     log_embed.add_field(name="Rating", value=f"{match.get('rating', '?')}/5", inline=True)
     log_embed.add_field(name="Reason", value=clip(reason, 500), inline=False)
     await bot.log_to(cfg("mod_log_channel"), log_embed)
+    return deleted_msg
 
+
+def vouches_involving(user_id: int) -> list[dict]:
+    return [v for v in store.data.setdefault("vouches", []) if v.get("by") == user_id or v.get("for") == user_id]
+
+
+def vouch_line(v: dict, user_id: int) -> str:
+    who = "left by them" if v.get("by") == user_id else f"from <@{v['by']}>"
+    return f"`Nº {v['id']}` {'⭐' * v.get('rating', 0)} · {clip(v.get('product', '—'), 40)} · {who} · {ts(v['time'], 'd')}"
+
+
+class DelVouchView(discord.ui.View):
+    def __init__(self, admin_id: int, user: discord.abc.User, reason: str):
+        super().__init__(timeout=600)
+        self.admin_id, self.user, self.reason = admin_id, user, reason
+        self.selected: list[int] = []
+        self.confirm_all = False
+        self.build()
+
+    def items(self) -> list[dict]:
+        return list(reversed(vouches_involving(self.user.id)))
+
+    def embed(self) -> discord.Embed:
+        items = self.items()
+        lines = [f"### 🗑️ Delete vouches • {self.user.display_name}"]
+        if not items:
+            lines.append("No vouches left for this person.")
+        else:
+            lines.append(f"**{len(items)}** vouch{'es' if len(items) != 1 else ''} by or for {self.user.mention}:")
+            lines += [vouch_line(v, self.user.id) for v in items[:20]]
+            if len(items) > 20:
+                lines.append(f"*…and {len(items) - 20} older ones (the dropdown shows the newest 25)*")
+        if self.selected:
+            lines += ["", f"**Selected:** {', '.join('Nº ' + str(i) for i in self.selected)}"]
+        if self.confirm_all:
+            lines += ["", f"{E('me_no', '⚠️')} **Press Confirm to delete all {len(items)}. This can't be undone.**"]
+        return discord.Embed(description="\n".join(lines), colour=discord.Colour.red() if self.confirm_all else COLOUR)
+
+    def build(self) -> None:
+        self.clear_items()
+        items = self.items()
+        if items:
+            options = [discord.SelectOption(
+                label=f"Nº {v['id']} · {'★' * v.get('rating', 0)} · {clip(v.get('product', '—'), 40)}"[:100],
+                value=str(v["id"]),
+                description=(("Left by them" if v.get("by") == self.user.id else "Vouch for them")
+                             + f" · {datetime.fromtimestamp(v['time'], timezone.utc):%d/%m/%Y}")[:100],
+                default=v["id"] in self.selected,
+            ) for v in items[:25]]
+            pick = discord.ui.Select(placeholder="Choose vouches to delete…", min_values=0,
+                                     max_values=len(options), options=options, row=0)
+            pick.callback = self.on_pick
+            self.add_item(pick)
+
+        delete = discord.ui.Button(label=f"Delete selected ({len(self.selected)})", style=discord.ButtonStyle.danger,
+                                   disabled=not self.selected, row=1)
+        delete.callback = self.on_delete
+        self.add_item(delete)
+        all_btn = discord.ui.Button(label=f"Confirm delete all ({len(items)})" if self.confirm_all else f"Delete all ({len(items)})",
+                                    style=discord.ButtonStyle.danger if self.confirm_all else discord.ButtonStyle.secondary,
+                                    disabled=not items, row=1)
+        all_btn.callback = self.on_all
+        self.add_item(all_btn)
+        cancel = discord.ui.Button(label="Cancel" if self.confirm_all else "Close", style=discord.ButtonStyle.secondary, row=1)
+        cancel.callback = self.on_cancel
+        self.add_item(cancel)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return interaction.user.id == self.admin_id
+
+    async def refresh(self, interaction: discord.Interaction, note: str | None = None) -> None:
+        self.build()
+        await interaction.response.edit_message(embed=self.embed(), view=self)
+        if note:
+            await interaction.followup.send(note, ephemeral=True)
+
+    async def on_pick(self, interaction: discord.Interaction) -> None:
+        self.selected = [int(v) for v in interaction.data.get("values", [])]
+        self.confirm_all = False
+        await self.refresh(interaction)
+
+    async def remove(self, interaction: discord.Interaction, ids: list[int]) -> None:
+        await interaction.response.defer()
+        found = 0
+        targets = [v for v in vouches_involving(self.user.id) if v["id"] in ids]
+        for v in targets:
+            if await delete_vouch(v, interaction.user, self.reason, interaction.channel):
+                found += 1
+        self.selected, self.confirm_all = [], False
+        self.build()
+        await interaction.edit_original_response(embed=self.embed(), view=self)
+        missing = len(targets) - found
+        note = f"🗑️ Deleted **{len(targets)}** vouch{'es' if len(targets) != 1 else ''}."
+        if missing:
+            note += f" {missing} message{'s' if missing != 1 else ''} couldn't be found in the channel, so delete {'those' if missing != 1 else 'it'} by hand if still up."
+        await interaction.followup.send(note, ephemeral=True)
+
+    async def on_delete(self, interaction: discord.Interaction) -> None:
+        await self.remove(interaction, list(self.selected))
+
+    async def on_all(self, interaction: discord.Interaction) -> None:
+        if not self.confirm_all:
+            self.confirm_all = True
+            return await self.refresh(interaction)
+        await self.remove(interaction, [v["id"] for v in vouches_involving(self.user.id)])
+
+    async def on_cancel(self, interaction: discord.Interaction) -> None:
+        if self.confirm_all:
+            self.confirm_all = False
+            return await self.refresh(interaction)
+        await interaction.response.edit_message(content="Closed.", embed=None, view=None)
+
+
+@bot.tree.command(name="delvouch", description="🗑️ Delete someone's vouches: pick one, several or all (admin)")
+@app_commands.default_permissions(administrator=True)
+@admin_only()
+@app_commands.describe(user="Whose vouches (left by them or for them)", reason="Why (optional, shown in the log)")
+async def delvouch(interaction: discord.Interaction, user: discord.User, reason: str = "No reason given") -> None:
+    view = DelVouchView(interaction.user.id, user, reason)
+    await interaction.response.send_message(embed=view.embed(), view=view, ephemeral=True,
+                                            allowed_mentions=discord.AllowedMentions.none())
 
 
 def vouches_page(user: discord.abc.User, page: int) -> tuple[discord.Embed, int]:
