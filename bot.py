@@ -3085,10 +3085,12 @@ def price_card(kind: str) -> discord.Embed:
             f"> **Profile Decorations**\n"
             f"{E('me_timer', '⏳')} **Coming soon!** Turn on the Restock or Announcement ping so you don't miss it."
         )
-    tickets = tickets_channel_id()
+    tickets = f"https://discord.com/channels/{GUILD_ID}/{tickets_channel_id()}"
+    tos = f"https://discord.com/channels/{GUILD_ID}/{TOS_CHANNEL_ID}"
+    body += "\n"
     if kind != "decos":
-        body += f"\n\n{E('me_ticket', '🎫')} **Open a ticket to buy** in <#{tickets}>"
-    body += f"\n{E('me_rules', '📜')} Read <#{TOS_CHANNEL_ID}> before buying."
+        body += f"\n{E('me_ticket', '🎫')} **[Click here to open a ticket and buy]({tickets})**"
+    body += f"\n{E('me_rules', '📜')} [Click here to read the TOS]({tos}) before buying"
     embed = discord.Embed(description=body, colour=COLOUR)
     if bot.user:
         embed.set_thumbnail(url=bot.user.display_avatar.url)
@@ -3122,7 +3124,7 @@ class PriceSelect(discord.ui.Select):
         )
 
     async def callback(self, interaction: discord.Interaction) -> None:
-        await interaction.response.send_message(embed=price_card(self.values[0]), view=price_links(), ephemeral=True)
+        await interaction.response.send_message(embed=price_card(self.values[0]), ephemeral=True)
         try:  # reset the dropdown so the same option can be picked again
             ref = (store.data.get("prices_post") or {}).get("banner")
             await interaction.message.edit(view=PricesLayout(ref))
