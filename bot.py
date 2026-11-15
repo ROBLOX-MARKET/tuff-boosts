@@ -398,6 +398,46 @@ async def balance(interaction: discord.Interaction):
                                     content=f"-# {CHECKER_NAME} · live USD via CoinGecko", view=RefreshView())
 
 
+async def _send_test(interaction: discord.Interaction, direction: str) -> None:
+    if OWNER_ID and interaction.user.id != OWNER_ID:
+        return await interaction.response.send_message("Only the owner can do that.", ephemeral=True)
+    await interaction.response.defer(ephemeral=True)
+    wallets = active_wallets()
+    if not wallets:
+        return await interaction.followup.send("No wallets are set up yet.", ephemeral=True)
+    w = next((x for x in wallets if x["chain"] in ("ltc", "btc", "sol")), wallets[0])
+    await refresh_prices(bot.session)
+    bal = await get_balance(bot.session, w)
+    unit = "lit" if w["chain"] == "ltc" else ("sat" if w["chain"] == "btc" else None)
+    tx = {
+        "direction": direction,
+        "amount": 0.01532418, "fee": 0.00001130 if unit else 0.0,
+        "fee_rate": f"5.11 {unit}/vB" if unit else None,
+        "confirmations": 1, "block": 3207751 if unit else None,
+        "to": w["address"] if direction == "received" else "ltc1qtest…demo8ff6wh",
+        "hash": "TEST000011f1ee121a88bfc5demo82a91607570f",
+    }
+    owner = interaction.user
+    try:
+        await owner.send(content="-# 🧪 Test alert", file=tx_file(w, tx, bal),
+                         view=LinkView(w["explorer_addr"] + w["address"]))
+    except discord.HTTPException:
+        return await interaction.followup.send(
+            "❌ Couldn't DM you — open **Privacy Settings → Allow direct messages from server members** "
+            "for this server, then try again.", ephemeral=True)
+    await interaction.followup.send(f"✅ Sent you a test **{direction}** DM.", ephemeral=True)
+
+
+@bot.tree.command(name="testreceive", description="DM yourself a sample 'received' alert (owner)")
+async def testreceive(interaction: discord.Interaction):
+    await _send_test(interaction, "received")
+
+
+@bot.tree.command(name="testsend", description="DM yourself a sample 'sent' alert (owner)")
+async def testsend(interaction: discord.Interaction):
+    await _send_test(interaction, "sent")
+
+
 # ===========================================================================
 # Watcher — DMs the owner on new confirmed transactions
 # ===========================================================================
