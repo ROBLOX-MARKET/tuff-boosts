@@ -32,12 +32,24 @@ def _f(name, size):
 
 
 def _mono(size):
-    for p in ("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",):
+    for p in (FONT_DIR / "DejaVuSansMono.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"):
         try:
-            return ImageFont.truetype(p, size * SS)
+            return ImageFont.truetype(str(p), size * SS)
         except OSError:
             pass
     return _f("Inter-Regular.otf", size)
+
+
+def _glyph_font(size):
+    for p in (FONT_DIR / "DejaVuSans-Bold.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"):
+        try:
+            return ImageFont.truetype(str(p), size)
+        except OSError:
+            pass
+    try:
+        return ImageFont.truetype(str(FONT_DIR / "Inter-Bold.otf"), size)
+    except OSError:
+        return ImageFont.load_default(size)
 
 
 BOLD = lambda s: _f("Inter-Bold.otf", s)
@@ -80,10 +92,7 @@ def coin_icon(symbol: str, d: int) -> Image.Image:
     bg = _COIN_BG.get(sym, (90, 94, 104))
     dr.ellipse([0, 0, s - 1, s - 1], fill=bg + (255,))
     glyph = {"USDC": "$", "USDT": "₮", "LTC": "Ł", "BTC": "₿", "ETH": "Ξ", "BNB": "B"}.get(sym, sym[:1])
-    try:
-        gf = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", int(s * 0.62))
-    except OSError:
-        gf = ImageFont.load_default(int(s * 0.62))
+    gf = _glyph_font(int(s * 0.62))
     dr.text((s / 2, s / 2 - s * 0.04), glyph, font=gf, fill=(255, 255, 255, 255), anchor="mm")
     if sym == "USDC":  # ring like the real logo
         dr.ellipse([int(s*0.2), int(s*0.2), int(s*0.8), int(s*0.8)], outline=(255, 255, 255, 230), width=max(2, int(s*0.05)))
