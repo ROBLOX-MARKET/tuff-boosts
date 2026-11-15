@@ -2769,7 +2769,7 @@ def vouch_sticky_embed() -> discord.Embed:
         description=(
             f"### {E('me_trophy', '⭐')} How to Vouch\n"
             f"Use {E('me_arrow', '➜')} **/vouch** — pick who you bought from, the product, price & rating.\n"
-            f"{E('me_no', '🚫')} Real orders only — no troll, fake or paid vouches *(deleted + ban)*."
+            f"{E('me_no', '🚫')} Real orders only — no troll, fake or paid vouches *(deleted + punishment)*."
         ),
         colour=COLOUR,
     )
