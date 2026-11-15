@@ -9,7 +9,8 @@ def make_app(ctx) -> web.Application:
     sessions: set[str] = set()
 
     def authed(req) -> bool:
-        return req.cookies.get("dash") in sessions
+        tok = req.headers.get("X-Dash-Token") or req.cookies.get("dash") or req.query.get("t")
+        return tok in sessions
 
     async def guard(req):
         return None if authed(req) else web.json_response({"error": "auth"}, status=401)
@@ -22,7 +23,7 @@ def make_app(ctx) -> web.Application:
         if secrets.compare_digest(str(data.get("password", "")), str(ctx["password"]())):
             tok = secrets.token_hex(16)
             sessions.add(tok)
-            r = web.json_response({"ok": True})
+            r = web.json_response({"ok": True, "token": tok})
             r.set_cookie("dash", tok, httponly=True, max_age=604800, samesite="Lax")
             return r
         return web.json_response({"ok": False}, status=401)
@@ -184,12 +185,21 @@ td input{padding:7px 9px}
 
 <script>
 let CH=[];
+let TOKEN=localStorage.getItem('dashtok')||'';
 const $=s=>document.querySelector(s);
-async function api(p,o){const r=await fetch(p,o);if(r.status===401){show('#login');$('#app').classList.add('hide');throw 0;}return r;}
+async function api(p,o){
+  o=o||{};o.headers=Object.assign({'X-Dash-Token':TOKEN},o.headers||{});
+  const r=await fetch(p,o);
+  if(r.status===401){TOKEN='';localStorage.removeItem('dashtok');show('#login');$('#app').classList.add('hide');throw 0;}
+  return r;
+}
 function show(s){$(s).classList.remove('hide');}
 async function doLogin(){
-  const r=await fetch('/login',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'password='+encodeURIComponent($('#pw').value)});
-  if(r.ok){$('#login').classList.add('hide');$('#app').classList.remove('hide');boot();}
+  $('#lerr').textContent='';
+  let r;
+  try{r=await fetch('/login',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'password='+encodeURIComponent($('#pw').value)});}
+  catch(e){$('#lerr').textContent='Could not reach the bot.';return;}
+  if(r.ok){const d=await r.json();TOKEN=d.token||'';localStorage.setItem('dashtok',TOKEN);$('#login').classList.add('hide');$('#app').classList.remove('hide');boot();}
   else $('#lerr').textContent='Wrong password.';
 }
 $('#pw')&&$('#pw').addEventListener('keydown',e=>{if(e.key==='Enter')doLogin();});
@@ -225,7 +235,7 @@ async function savePrices(){
   const r=await(await api('/api/prices',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({nitro:$('#nitro').value.trim(),boosts,decorations:$('#decos').value.trim()})})).json();
   m.textContent=r.ok?'✅ Saved — prices panel updated.':'❌ failed';if(!r.ok)m.className='msg err';
 }
-// auto-skip login if cookie still valid
-fetch('/api/overview').then(r=>{if(r.ok){$('#login').classList.add('hide');$('#app').classList.remove('hide');boot();}});
+// auto-skip login if a saved token still works
+if(TOKEN){fetch('/api/overview',{headers:{'X-Dash-Token':TOKEN}}).then(r=>{if(r.ok){$('#login').classList.add('hide');$('#app').classList.remove('hide');boot();}});}
 </script>
 </body></html>"""
