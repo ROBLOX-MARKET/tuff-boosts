@@ -371,9 +371,14 @@ class CryptoBot(commands.Bot):
         self.session = aiohttp.ClientSession()
         self.add_view(RefreshView())
         if GUILD_ID:
-            g = discord.Object(id=GUILD_ID)
-            self.tree.copy_global_to(guild=g)
-            await self.tree.sync(guild=g)
+            try:
+                g = discord.Object(id=GUILD_ID)
+                self.tree.copy_global_to(guild=g)
+                await self.tree.sync(guild=g)
+                log.info("Synced commands to guild %s", GUILD_ID)
+            except discord.HTTPException as exc:
+                # Bot isn't in that guild (or lacks the commands scope) — fall back to global sync.
+                log.warning("Guild sync skipped (%s); using global sync instead", exc)
         await self.tree.sync()
         self.loop.create_task(watcher())
 
