@@ -2755,6 +2755,73 @@ async def info_panel_cmd(interaction: discord.Interaction) -> None:
 
 
 # ===========================================================================
+# Payments panel (Ehsan — crypto / Munzy — bank, crypto, gift cards, Robux)
+# ===========================================================================
+
+PAYMENTS_CHANNEL_ID = 1570048043473174538
+EHSAN_ID = 1001419810699223071
+MUNZY_ID = 1492971645747593256
+
+
+def payments_sections() -> list[str]:
+    b = "`✦`"
+    return [
+        f"# {E('me_bank', '\U0001f4b3')} {STORE_NAME} — Payment Methods\n"
+        f"> Pick who you're paying and use one of their methods below.\n"
+        f"> {E('me_no', '⚠️')} Only ever pay through your **ticket**, and only what staff confirm — never in DMs.",
+        f"### {E('me_crown', '\U0001f451')} Ehsan — <@{EHSAN_ID}>\n"
+        f"> Takes **crypto** — any coin works, these are preferred:\n"
+        f"> {E('me_btc', '₿')} **Bitcoin** (BTC)\n"
+        f"> {E('me_ltc', 'Ł')} **Litecoin** (LTC)\n"
+        f"> {E('me_usdt', '₮')} **USDT** (Tether)\n"
+        f"> {E('me_coins', '\U0001fa99')} ...or **any other crypto coin** — just ask in your ticket",
+        f"### {E('me_crown', '\U0001f451')} Munzy — <@{MUNZY_ID}>\n"
+        f"> {E('me_gbp', '\U0001f4b7')} **UK Bank Transfer**\n"
+        f"> {E('me_ltc', 'Ł')} **Litecoin** (LTC)\n"
+        f"> {E('me_usdt', '₮')} **USDT** (Tether)\n"
+        f"> {E('me_btc', '₿')} **Bitcoin** (BTC)\n"
+        f"> {E('me_giftcard', '\U0001f381')} **Gift Cards**\n"
+        f"> {E('me_robux', '\U0001f3ae')} **Robux**",
+    ]
+
+
+class PaymentsLayout(discord.ui.LayoutView):
+    def __init__(self, banner: str | None = None):
+        super().__init__(timeout=None)
+        parts: list[discord.ui.Item] = []
+        if banner:
+            parts.append(discord.ui.MediaGallery(discord.MediaGalleryItem(media=banner)))
+        sections = payments_sections()
+        for i, text in enumerate(sections):
+            parts.append(discord.ui.TextDisplay(text))
+            if i < len(sections) - 1:
+                parts.append(discord.ui.Separator())
+        parts.append(discord.ui.TextDisplay(
+            f"-# {E('me_respect', '\U0001f90d')} {STORE_NAME} • Payments are handled in your ticket"))
+        self.add_item(discord.ui.Container(*parts, accent_color=COLOUR))
+
+
+async def send_payments(channel: discord.abc.Messageable) -> discord.Message:
+    if BANNER_FILE.exists():
+        ref = f"attachment://{BANNER_FILE.name}"
+        message = await channel.send(view=PaymentsLayout(ref), file=discord.File(BANNER_FILE))
+    else:
+        message = await channel.send(view=PaymentsLayout(BANNER_URL or None))
+    store.data["payments_post"] = {"channel": channel.id, "message": message.id}
+    store.save()
+    return message
+
+
+@bot.tree.command(name="paymentspanel", description="\U0001f4b3 Post the payment methods panel in this channel (admin)")
+@app_commands.default_permissions(administrator=True)
+@admin_only()
+async def payments_panel_cmd(interaction: discord.Interaction) -> None:
+    await interaction.response.defer(ephemeral=True)
+    await send_payments(interaction.channel)
+    await interaction.followup.send("✅ Payment methods posted.", ephemeral=True)
+
+
+# ===========================================================================
 # Boost keys: /addkeys, /availablekeys (redeem + mark used), /keys
 # ===========================================================================
 
