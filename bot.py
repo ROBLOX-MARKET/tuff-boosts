@@ -3056,12 +3056,11 @@ BOOST_PRICES = [  # (pack, 1 month, 3 months)
 ]
 
 
+TICKETS_CHANNEL_ID = 1570047964548829194
+
+
 def tickets_channel_id() -> int | None:
-    guild = bot.get_guild(GUILD_ID)
-    if guild is None:
-        return None
-    ch = discord.utils.find(lambda c: "tickets" in c.name.lower(), guild.text_channels)
-    return ch.id if ch else None
+    return TICKETS_CHANNEL_ID
 
 
 def price_card(kind: str) -> discord.Embed:
