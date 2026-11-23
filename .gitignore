@@ -1,0 +1,5 @@
+.env
+swaps.json
+swaps.tmp
+__pycache__/
+*.pyc
