@@ -205,12 +205,15 @@ document.getElementById('add').addEventListener('click',function(){
 });
 
 /* ---- audio + buzz ---- */
-function beep(){try{if(!audioCtx)return;var o=audioCtx.createOscillator(),g=audioCtx.createGain();
-  o.type='square';o.frequency.value=880;g.gain.value=0.0001;o.connect(g);g.connect(audioCtx.destination);
-  var t=audioCtx.currentTime;g.gain.setValueAtTime(0.0001,t);g.gain.exponentialRampToValueAtTime(0.25,t+0.02);
-  g.gain.exponentialRampToValueAtTime(0.0001,t+0.4);o.start(t);o.stop(t+0.42);
-  o.frequency.setValueAtTime(880,t);o.frequency.setValueAtTime(660,t+0.18);}catch(e){}}
-function buzz(){if(navigator.vibrate)try{navigator.vibrate([350,120,350,120,500]);}catch(e){}beep();}
+/* loud back-to-back siren sweeps (~1.3s of continuous noise) */
+function siren(){try{if(!audioCtx)return;var t=audioCtx.currentTime;
+  for(var k=0;k<4;k++){var o=audioCtx.createOscillator(),g=audioCtx.createGain();
+    o.type='square';o.connect(g);g.connect(audioCtx.destination);var s=t+k*0.33;
+    o.frequency.setValueAtTime(1000,s);o.frequency.linearRampToValueAtTime(600,s+0.16);o.frequency.linearRampToValueAtTime(1000,s+0.31);
+    g.gain.setValueAtTime(0.0001,s);g.gain.exponentialRampToValueAtTime(0.5,s+0.02);g.gain.exponentialRampToValueAtTime(0.0001,s+0.32);
+    o.start(s);o.stop(s+0.33);}}catch(e){}}
+/* long, relentless vibration */
+function buzz(){if(navigator.vibrate)try{navigator.vibrate([700,150,700,150,700,150,900,150,700]);}catch(e){}siren();}
 function unlockAudio(){try{audioCtx=audioCtx||new(window.AudioContext||window.webkitAudioContext)();
   if(audioCtx.state==='suspended')audioCtx.resume();}catch(e){}}
 
@@ -223,7 +226,7 @@ function checkRing(){
       var c=byId[a.coin]||{sym:a.coin};return c.sym+' '+(a.dir==='above'?'≥':'≤')+' '+fmt(a.target);});
     document.getElementById('olist').innerHTML=names.join('<br>');
     ov.classList.add('show');
-    if(!ringTimer){buzz();ringTimer=setInterval(buzz,1600);}
+    if(!ringTimer){buzz();ringTimer=setInterval(buzz,1300);}
   }else{
     ov.classList.remove('show');
     if(ringTimer){clearInterval(ringTimer);ringTimer=null;}
@@ -264,9 +267,10 @@ document.getElementById('arm').addEventListener('click',function(){setArmed(!arm
 document.getElementById('test').addEventListener('click',function(){unlockAudio();buzz();});
 
 document.getElementById('note').innerHTML=
-  '<b>Keep this tab open & on-screen</b> while armed — phones pause background tabs, so alerts fire only while Coin Buzzer is up front. '+
-  'Prices are live market prices (CoinGecko), the same ones Exodus shows. '+
-  'On <b>iPhone</b> the screen won’t vibrate (Apple blocks it in the browser) — you’ll still get the beep, so turn your volume up. For true background alerts you’d need a native app.';
+  'When it fires it’s a <b>loud siren + nonstop vibration</b> until you tap Stop. For it to reach you: '+
+  '<b>keep this tab open and the screen on</b> (the app holds the screen awake while armed), <b>turn your volume up</b>, and turn <b>off silent mode</b> — a web page can’t override silent or ring through a locked/asleep phone, only a native app can. '+
+  'If you lock the phone or switch apps, alerts pause until you’re back on this screen. '+
+  'Prices are live market prices (CoinGecko), the same ones Exodus shows. On <b>iPhone</b> the screen won’t vibrate (Apple blocks it in browsers) — you’ll still get the siren.';
 
 render();
 </script>
