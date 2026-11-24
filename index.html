@@ -205,15 +205,16 @@ document.getElementById('add').addEventListener('click',function(){
 });
 
 /* ---- audio + buzz ---- */
-/* loud back-to-back siren sweeps (~1.3s of continuous noise) */
-function siren(){try{if(!audioCtx)return;var t=audioCtx.currentTime;
-  for(var k=0;k<4;k++){var o=audioCtx.createOscillator(),g=audioCtx.createGain();
-    o.type='square';o.connect(g);g.connect(audioCtx.destination);var s=t+k*0.33;
-    o.frequency.setValueAtTime(1000,s);o.frequency.linearRampToValueAtTime(600,s+0.16);o.frequency.linearRampToValueAtTime(1000,s+0.31);
-    g.gain.setValueAtTime(0.0001,s);g.gain.exponentialRampToValueAtTime(0.5,s+0.02);g.gain.exponentialRampToValueAtTime(0.0001,s+0.32);
-    o.start(s);o.stop(s+0.33);}}catch(e){}}
-/* long, relentless vibration */
-function buzz(){if(navigator.vibrate)try{navigator.vibrate([700,150,700,150,700,150,900,150,700]);}catch(e){}siren();}
+/* one metallic bell strike with inharmonic partials + long ring-out */
+function strike(t){var base=680,parts=[[1,1],[2.0,0.55],[2.76,0.33],[3.52,0.2],[5.4,0.12]];
+  parts.forEach(function(p){var o=audioCtx.createOscillator(),g=audioCtx.createGain();
+    o.type='sine';o.frequency.value=base*p[0];o.connect(g);g.connect(audioCtx.destination);
+    g.gain.setValueAtTime(0.0001,t);g.gain.exponentialRampToValueAtTime(0.33*p[1],t+0.004);
+    g.gain.exponentialRampToValueAtTime(0.0001,t+0.55);o.start(t);o.stop(t+0.57);});}
+/* ring the bell over and over (strikes ~every 0.45s, continuous while ringing) */
+function bell(){try{if(!audioCtx)return;var t=audioCtx.currentTime;strike(t);strike(t+0.45);strike(t+0.9);}catch(e){}}
+/* long, relentless vibration in time with the bell */
+function buzz(){if(navigator.vibrate)try{navigator.vibrate([400,120,400,120,400,120,400]);}catch(e){}bell();}
 function unlockAudio(){try{audioCtx=audioCtx||new(window.AudioContext||window.webkitAudioContext)();
   if(audioCtx.state==='suspended')audioCtx.resume();}catch(e){}}
 
@@ -267,10 +268,10 @@ document.getElementById('arm').addEventListener('click',function(){setArmed(!arm
 document.getElementById('test').addEventListener('click',function(){unlockAudio();buzz();});
 
 document.getElementById('note').innerHTML=
-  'When it fires it’s a <b>loud siren + nonstop vibration</b> until you tap Stop. For it to reach you: '+
+  'When it fires it’s a <b>ringing bell + nonstop vibration</b> that keeps going until you tap Stop. For it to reach you: '+
   '<b>keep this tab open and the screen on</b> (the app holds the screen awake while armed), <b>turn your volume up</b>, and turn <b>off silent mode</b> — a web page can’t override silent or ring through a locked/asleep phone, only a native app can. '+
   'If you lock the phone or switch apps, alerts pause until you’re back on this screen. '+
-  'Prices are live market prices (CoinGecko), the same ones Exodus shows. On <b>iPhone</b> the screen won’t vibrate (Apple blocks it in browsers) — you’ll still get the siren.';
+  'Prices are live market prices (CoinGecko), the same ones Exodus shows. On <b>iPhone</b> the screen won’t vibrate (Apple blocks it in browsers) — you’ll still get the bell.';
 
 render();
 </script>
