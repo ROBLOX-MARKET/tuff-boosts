@@ -3411,10 +3411,12 @@ class EmbedModal(discord.ui.Modal, title="🎨 Create an embed"):
     image = discord.ui.TextInput(label="Image link (optional)", required=False, placeholder="https://...")
     footer = discord.ui.TextInput(label="Footer (optional)", required=False, max_length=2048)
 
-    def __init__(self, channel: discord.abc.Messageable, attachment: discord.Attachment | None):
+    def __init__(self, channel: discord.abc.Messageable, attachment: discord.Attachment | None,
+                 use_banner: bool = False):
         super().__init__()
         self.channel = channel
         self.attachment = attachment
+        self.use_banner = use_banner
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         if not self.heading.value and not self.body.value:
@@ -3432,6 +3434,9 @@ class EmbedModal(discord.ui.Modal, title="🎨 Create an embed"):
             embed.set_image(url=f"attachment://{file.filename}")
         elif self.image.value.strip().startswith("http"):
             embed.set_image(url=self.image.value.strip())
+        elif self.use_banner and BANNER_FILE.exists():
+            file = discord.File(BANNER_FILE, filename=BANNER_FILE.name)
+            embed.set_image(url=f"attachment://{BANNER_FILE.name}")
         await interaction.response.defer(ephemeral=True)
         if file:
             await self.channel.send(embed=embed, file=file)
@@ -3442,9 +3447,11 @@ class EmbedModal(discord.ui.Modal, title="🎨 Create an embed"):
 
 @embed_group.command(name="create", description="🎨 Make a custom embed")
 @admin_only()
-@app_commands.describe(channel="Where to send it (default: here)", image="Image to show in the embed (optional)")
-async def embed_create(interaction: discord.Interaction, channel: discord.TextChannel = None, image: discord.Attachment = None) -> None:
-    await interaction.response.send_modal(EmbedModal(channel or interaction.channel, image))
+@app_commands.describe(channel="Where to send it (default: here)", image="Image to show in the embed (optional)",
+                       banner="Add the Simple Boosts banner at the bottom of the embed")
+async def embed_create(interaction: discord.Interaction, channel: discord.TextChannel = None,
+                       image: discord.Attachment = None, banner: bool = False) -> None:
+    await interaction.response.send_modal(EmbedModal(channel or interaction.channel, image, banner))
 
 
 # ===========================================================================
