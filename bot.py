@@ -4,7 +4,8 @@ Lightweight (no image rendering) so it runs comfortably under 100 MB RAM.
 
 Environment variables (set on your host, never in code/chat):
   BOT_TOKEN   - your bot token (reset it if it ever leaks)   [required]
-  GUILD_ID    - your server ID (slash commands sync here instantly)  [required]
+  GUILD_ID    - your server ID (OPTIONAL now — the bot auto-syncs to every
+                server it's in, so you don't even need this)
 """
 
 import asyncio
@@ -27,9 +28,7 @@ TOKEN = os.getenv("BOT_TOKEN", "").strip()
 GUILD_ID = os.getenv("GUILD_ID", "").strip()
 if not TOKEN or TOKEN.startswith("PASTE"):
     raise SystemExit("Set BOT_TOKEN in your environment variables.")
-if not GUILD_ID.isdigit():
-    raise SystemExit("Set GUILD_ID (your server ID, numbers only) in your environment variables.")
-GUILD_ID = int(GUILD_ID)
+GUILD_ID = int(GUILD_ID) if GUILD_ID.isdigit() else None  # optional: just makes sync instant
 
 ACCENT = 0x8A4DFF
 GOOD = 0x37D98A
@@ -481,11 +480,11 @@ async def giveaway_loop():
     await bot.wait_until_ready()
     while not bot.is_closed():
         try:
-            guild = bot.get_guild(GUILD_ID)
-            if guild:
-                for mid, gw in list(store.giveaways.items()):
-                    if not gw.get("ended") and now() >= datetime.fromisoformat(gw["end"]):
-                        await end_giveaway(mid, gw, guild)
+            for mid, gw in list(store.giveaways.items()):
+                if not gw.get("ended") and now() >= datetime.fromisoformat(gw["end"]):
+                    ch = bot.get_channel(int(gw["channel"]))
+                    if ch:
+                        await end_giveaway(mid, gw, ch.guild)
         except Exception as ex:
             print("giveaway loop:", ex)
         await asyncio.sleep(20)
@@ -623,18 +622,47 @@ async def setup_hook():
     bot.tree.add_command(embed_group)
     bot.tree.add_command(giveaway_group)
     bot.add_view(GiveawayView())
-    g = discord.Object(id=GUILD_ID)
-    bot.tree.copy_global_to(guild=g)
-    try:
-        await bot.tree.sync(guild=g)
-    except discord.Forbidden:
-        print("Can't sync commands — make sure the bot is in the server (GUILD_ID) with the applications.commands scope.")
     bot.loop.create_task(giveaway_loop())
+
+
+_synced = False
 
 
 @bot.event
 async def on_ready():
-    print(f"Logged in as {bot.user}")
+    global _synced
+    print(f"Logged in as {bot.user} (id {bot.user.id})")
+    if not bot.guilds:
+        print("⚠️  I'm not in ANY server yet. Invite me with the link, "
+              "then I'll sync automatically.")
+    else:
+        print(f"I'm in {len(bot.guilds)} server(s):")
+        for g in bot.guilds:
+            print(f"   • {g.name}  (id {g.id})")
+    if _synced:
+        return
+    _synced = True
+    # Sync slash commands to EVERY server the bot is in — so the commands
+    # show up wherever it actually landed, no matter the GUILD_ID.
+    for g in bot.guilds:
+        try:
+            bot.tree.copy_global_to(guild=g)
+            await bot.tree.sync(guild=g)
+            print(f"✅ Commands synced to {g.name}")
+        except Exception as e:
+            print(f"❌ Couldn't sync to {g.name}: {e}")
+
+
+@bot.event
+async def on_guild_join(guild):
+    # The moment someone adds the bot to a server, sync commands there.
+    print(f"➕ Joined {guild.name} (id {guild.id}) — syncing commands…")
+    try:
+        bot.tree.copy_global_to(guild=guild)
+        await bot.tree.sync(guild=guild)
+        print(f"✅ Commands synced to {guild.name}")
+    except Exception as e:
+        print(f"❌ Couldn't sync to {guild.name}: {e}")
 
 
 if __name__ == "__main__":
