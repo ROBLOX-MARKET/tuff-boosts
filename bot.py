@@ -43,14 +43,27 @@ BANNER_FILE = BASE / "banner.gif"
 # Override by setting TICKET_ROLE in env, else this default.
 TICKET_ROLE_DEFAULT = 1575014415458111551
 
-# Payment methods shown when someone opens a "Purchase Boosts" ticket.
+# Payment methods for purchase tickets: (name, custom-emoji name, fee text or None)
 PAY_METHODS = [
-    ("PayPal",            "💳"),
-    ("Crypto (LTC/BTC/ETH)", "🪙"),
-    ("CashApp",           "💵"),
-    ("Apple / Google Pay", "📱"),
-    ("Card / Other",      "🏦"),
+    ("USDT", "sb_usdt", None),
+    ("BTC",  "sb_btc",  "$1"),
+    ("LTC",  "sb_ltc",  "$1"),
 ]
+PAY_FEE = {name: fee for name, _e, fee in PAY_METHODS}
+
+# Custom emojis the bot uploads to the server (files live in ./emojis/<name>.png)
+EMOJI_FILES = ["sb_usdt", "sb_btc", "sb_ltc", "sb_ticket", "sb_boost"]
+EMOJI = {}  # name -> discord.Emoji (filled at runtime by ensure_emojis)
+
+
+def em(name, fallback=""):
+    e = EMOJI.get(name)
+    return str(e) if e else fallback
+
+
+def pay_label(name):
+    fee = PAY_FEE.get(name)
+    return f"{name} — **+{fee} fee**" if fee else f"{name} — **no fee**"
 
 
 # ----------------------------------------------------------------- data store
@@ -520,19 +533,23 @@ class GiveawayView(discord.ui.View):
 def gw_embed(gw):
     end = datetime.fromisoformat(gw["end"])
     ended = gw.get("ended")
+    spark = em("sb_boost", "🎉")
     e = discord.Embed(
-        title=f"🎉  {gw['prize']}",
-        colour=0x3BA55D if ended else ACCENT,
-        description=("🎊 **This giveaway has ended!**" if ended
-                     else "React with the **🎉 Enter** button below for a chance to win!"),
+        title=f"{spark}  {gw['prize']}",
+        colour=0x5A2DA6 if ended else ACCENT,
+        description=("🎊 **This giveaway has ended!**\nThanks to everyone who entered." if ended
+                     else "Press **🎉 Enter** below for your chance to win!"),
     )
-    e.add_field(name="⏳ Ends", value=f"<t:{int(end.timestamp())}:R>\n<t:{int(end.timestamp())}:f>", inline=True)
+    ts = int(end.timestamp())
+    e.add_field(name="⏳ Ended" if ended else "⏳ Ends",
+                value=f"<t:{ts}:R>" if not ended else f"<t:{ts}:f>", inline=True)
     e.add_field(name="🏆 Winners", value=f"**{gw['winners']}**", inline=True)
     e.add_field(name="👥 Entries", value=f"**{len(gw.get('entrants', []))}**", inline=True)
     reqs = requirement_lines(gw)
     if reqs:
         e.add_field(name="📋 Requirements to enter", value="\n".join(reqs), inline=False)
-    e.set_footer(text=f"Hosted by {gw['host']} • Good luck!")
+    e.add_field(name="🎀 Hosted by", value=f"<@{gw['host_id']}>", inline=False)
+    e.set_footer(text="Simple Boosts • Good luck! 🍀")
     e.timestamp = end
     return e
 
@@ -756,6 +773,36 @@ async def buildserver(i: discord.Interaction):
 TICKET_CAT = "🎫 Tickets"
 TRANSCRIPT_NAME = "📑┃transcripts"
 
+# Ticket categories for the panel dropdown:
+#   (label, description, emoji-name-or-unicode, kind)
+TICKET_CATEGORIES = [
+    ("Purchase Boosts", "Order boosts — only if the website is down", "sb_boost", "buy"),
+    ("Support", "Questions, issues, or anything else", "💬", "support"),
+    ("Replacement", "Something stopped — you'll need your invoice ID", "🔁", "replacement"),
+]
+
+
+async def ensure_emojis(guild):
+    """Upload the bot's custom emojis to the server if they're not there yet."""
+    existing = {e.name: e for e in guild.emojis}
+    for name in EMOJI_FILES:
+        if name in existing:
+            EMOJI[name] = existing[name]
+            continue
+        p = BASE / "emojis" / f"{name}.png"
+        if not p.exists():
+            continue
+        try:
+            EMOJI[name] = await guild.create_custom_emoji(
+                name=name, image=p.read_bytes(), reason="Simple Boosts branding")
+        except Exception as ex:
+            print(f"emoji {name}: {ex}")
+
+
+def _emoji_for(token):
+    """token is a custom-emoji name we uploaded, or a plain unicode emoji."""
+    return EMOJI.get(token, token)
+
 
 def _ticket_overwrites(guild, opener):
     role = guild.get_role(ticket_role_id(guild))
@@ -897,7 +944,7 @@ async def close_ticket(channel, closer):
         pass
 
 
-async def open_ticket(i, kind, pay=None):
+async def open_ticket(i, kind, pay=None, invoice=None):
     guild = i.guild
     if guild is None:
         return await i.response.send_message("Use this in a server.", ephemeral=True)
@@ -917,7 +964,7 @@ async def open_ticket(i, kind, pay=None):
         except Exception:
             cat = None
     safe = re.sub(r"[^a-z0-9]+", "-", i.user.name.lower()).strip("-") or "user"
-    prefix = "buy" if kind == "buy" else "support"
+    prefix = {"buy": "order", "support": "support", "replacement": "replace"}.get(kind, "ticket")
     try:
         ch = await guild.create_text_channel(
             f"{prefix}-{safe}", category=cat, overwrites=_ticket_overwrites(guild, i.user))
@@ -925,28 +972,38 @@ async def open_ticket(i, kind, pay=None):
         return await i.followup.send(
             "❌ I need the **Manage Channels** permission (give me Administrator).", ephemeral=True)
     store.tickets[str(ch.id)] = {"opener": i.user.id, "kind": kind, "pay": pay,
-                                 "at": now().isoformat(), "closed": False}
+                                 "invoice": invoice, "at": now().isoformat(), "closed": False}
     store.save()
     role = guild.get_role(ticket_role_id(guild))
     ping = role.mention if role else ""
     if kind == "buy":
+        fee = PAY_FEE.get(pay)
+        pe = em(f"sb_{pay.lower()}") if pay else ""
         e = discord.Embed(
-            title="🛒 Purchase Boosts",
+            title=f"{em('sb_boost', '🛒')}  Purchase Boosts",
             colour=ACCENT,
             description=("Thanks for your order! A staff member will be with you shortly.\n\n"
-                         "Please send:\n"
-                         "• **What** you want to buy\n"
-                         "• **How many / how long**\n"
-                         "• Your **server invite** (if boosting a server)"))
-        e.add_field(name="💳 Payment", value=pay or "—", inline=True)
+                         "**Please send:**\n"
+                         "› What you want to buy\n"
+                         "› How many / how long\n"
+                         "› Your server invite (if boosting a server)"))
+        e.add_field(name="Payment", value=f"{pe} **{pay}**".strip(), inline=True)
+        e.add_field(name="Fee", value=(f"+{fee}" if fee else "No fee"), inline=True)
+    elif kind == "replacement":
+        e = discord.Embed(
+            title="🔁  Replacement",
+            colour=ACCENT,
+            description="We'll get your replacement sorted. A staff member will verify your "
+                        "invoice and help you out.")
+        e.add_field(name="Invoice ID", value=f"`{invoice}`" if invoice else "—", inline=True)
     else:
         e = discord.Embed(
-            title="💬 Support",
+            title="💬  Support",
             colour=ACCENT,
             description="Thanks for reaching out! Describe your issue in as much detail as you can "
                         "and a staff member will help you out.")
-    e.add_field(name="👤 Opened by", value=i.user.mention, inline=True)
-    e.set_footer(text="Staff only can close this ticket.")
+    e.add_field(name="Opened by", value=i.user.mention, inline=True)
+    e.set_footer(text="Simple Boosts • Only staff can close this ticket")
     await ch.send(content=f"{ping} {i.user.mention}".strip(),
                   embed=e, view=TicketCloseView(),
                   allowed_mentions=discord.AllowedMentions(roles=True, users=True))
@@ -956,7 +1013,12 @@ async def open_ticket(i, kind, pay=None):
 class PaymentSelect(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=180)
-        opts = [discord.SelectOption(label=name, emoji=emoji) for name, emoji in PAY_METHODS]
+        opts = []
+        for name, ename, fee in PAY_METHODS:
+            opts.append(discord.SelectOption(
+                label=name, value=name,
+                description=(f"+{fee} fee" if fee else "No fee"),
+                emoji=_emoji_for(ename)))
         self.sel = discord.ui.Select(placeholder="Choose your payment method…", options=opts)
         self.sel.callback = self._picked
         self.add_item(self.sel)
@@ -965,22 +1027,37 @@ class PaymentSelect(discord.ui.View):
         await open_ticket(i, "buy", pay=self.sel.values[0])
 
 
+class ReplacementModal(discord.ui.Modal, title="Replacement request"):
+    invoice = discord.ui.TextInput(label="Your invoice ID", placeholder="e.g. INV-12345",
+                                   required=True, max_length=100)
+
+    async def on_submit(self, i: discord.Interaction):
+        await open_ticket(i, "replacement", invoice=str(self.invoice))
+
+
 class TicketPanelView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
+        opts = []
+        for label, desc, etok, kind in TICKET_CATEGORIES:
+            opts.append(discord.SelectOption(label=label, description=desc, value=kind,
+                                             emoji=_emoji_for(etok)))
+        self.sel = discord.ui.Select(placeholder="Choose a ticket category…", options=opts,
+                                     custom_id="tkt:category", min_values=1, max_values=1)
+        self.sel.callback = self._picked
+        self.add_item(self.sel)
 
-    @discord.ui.button(label="Purchase Boosts", emoji="🛒",
-                       style=discord.ButtonStyle.success, custom_id="tkt:buy")
-    async def buy(self, i: discord.Interaction, b: discord.ui.Button):
-        await i.response.send_message(
-            "⚠️ **Only open a purchase ticket if the website is down.**\n"
-            "Otherwise please order through the website.\n\nPick your payment method below:",
-            view=PaymentSelect(), ephemeral=True)
-
-    @discord.ui.button(label="Support", emoji="💬",
-                       style=discord.ButtonStyle.primary, custom_id="tkt:support")
-    async def support(self, i: discord.Interaction, b: discord.ui.Button):
-        await open_ticket(i, "support")
+    async def _picked(self, i: discord.Interaction):
+        kind = self.sel.values[0]
+        if kind == "buy":
+            await i.response.send_message(
+                "⚠️ **Only open a purchase ticket if the website is down.**\n"
+                "Otherwise please order on the website.\n\nSelect how you'd like to pay:",
+                view=PaymentSelect(), ephemeral=True)
+        elif kind == "replacement":
+            await i.response.send_modal(ReplacementModal())
+        else:
+            await open_ticket(i, "support")
 
 
 class TicketCloseView(discord.ui.View):
@@ -1003,28 +1080,42 @@ ticket_group = app_commands.Group(name="ticket", description="Ticket system",
 
 
 @ticket_group.command(name="panel", description="🎫 Post the ticket panel in this channel")
-@app_commands.describe(banner="Attach the Simple Boosts banner to the top (optional)")
-async def ticket_panel(i: discord.Interaction, banner: bool = False):
-    role = i.guild.get_role(ticket_role_id(i.guild))
-    role_txt = role.mention if role else f"`{ticket_role_id(i.guild)}`"
-    e = discord.Embed(
-        title="🎫  Open a Ticket",
-        colour=ACCENT,
-        description=("Need something? Open a ticket below and our team will help you out.\n\n"
-                     "🛒 **Purchase Boosts** — order boosts *(only if the website is down)*. "
-                     "You'll be asked which payment method you want to use.\n"
-                     "💬 **Support** — questions, issues, or anything else.\n\n"
-                     f"Our staff team ({role_txt}) will respond as soon as possible."))
-    e.set_footer(text="One ticket per person • Be patient, staff will be with you soon")
+@app_commands.describe(banner="Show the Simple Boosts banner on top (default: yes)")
+async def ticket_panel(i: discord.Interaction, banner: bool = True):
+    await i.response.defer(ephemeral=True)
+    await ensure_emojis(i.guild)
+    tick = em("sb_ticket", "🎫")
+    paytxt = "  ".join(f"{em('sb_'+n.lower())} **{n}**" + (f" (+{f})" if f else "")
+                       for n, _e, f in PAY_METHODS)
+    body = discord.Embed(colour=ACCENT, title=f"{tick}  Simple Boosts Support",
+                         description="*Your #1 leading boost provider*")
+    body.add_field(
+        name="💬 How can we help?",
+        value="Pick the category that fits your request and the right team will pick it up.",
+        inline=False)
+    body.add_field(
+        name="📌 Before you open a ticket",
+        value=("› Read the server **rules** before you open a ticket.\n"
+               "› Pick the **category** that matches your request.\n"
+               "› Replacements need your **invoice ID**."),
+        inline=False)
+    body.add_field(
+        name="💳 Payments we accept",
+        value=f"{paytxt}\n*USDT has no fee · BTC & LTC have a $1 fee.*",
+        inline=False)
+    body.set_footer(text="Simple Boosts · Your #1 leading boost provider")
+    embeds = [body]
     file = None
     if banner and BANNER_FILE.exists():
         file = discord.File(BANNER_FILE, filename="banner.gif")
-        e.set_image(url="attachment://banner.gif")
-    await i.response.send_message("✅ Panel posted.", ephemeral=True)
+        top = discord.Embed(colour=ACCENT)
+        top.set_image(url="attachment://banner.gif")
+        embeds = [top, body]   # banner renders ABOVE the content embed
+    kwargs = {"embeds": embeds, "view": TicketPanelView()}
     if file:
-        await i.channel.send(embed=e, view=TicketPanelView(), file=file)
-    else:
-        await i.channel.send(embed=e, view=TicketPanelView())
+        kwargs["file"] = file
+    await i.channel.send(**kwargs)
+    await i.followup.send("✅ Panel posted.", ephemeral=True)
 
 
 @ticket_group.command(name="setrole", description="🎫 Set which role is pinged & can close tickets")
@@ -1163,6 +1254,7 @@ async def on_ready():
             print(f"   • {g.name}  (id {g.id})")
     for g in bot.guilds:
         await refresh_invites(g)
+        await ensure_emojis(g)
     if _synced:
         return
     _synced = True
@@ -1187,6 +1279,10 @@ async def on_guild_join(guild):
         print(f"✅ Commands synced to {guild.name}")
     except Exception as e:
         print(f"❌ Couldn't sync to {guild.name}: {e}")
+    try:
+        await ensure_emojis(guild)
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":
