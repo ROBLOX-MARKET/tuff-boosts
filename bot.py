@@ -547,21 +547,12 @@ def vouch_stats():
 
 def vouch_sticky_embed():
     n, avg = vouch_stats()
-    stars = "⭐" * round(avg) if n else "—"
-    arr = em("sb_arrow", "›")
+    rating = f"{avg:.1f}/5 ⭐" if n else "—"
     e = discord.Embed(
-        title=f"{em('sb_star', '⭐')}  How to leave a vouch",
         colour=ACCENT,
-        description=("Bought from us? Drop a vouch! 💜\n\n"
-                     "Use **`/vouch`** and fill in:\n"
-                     f"{arr} **order** — your order ID\n"
-                     f"{arr} **rating** — 1 to 5 ⭐\n"
-                     f"{arr} **comment** — a few words about your experience"))
-    e.add_field(name="📊 Total vouches", value=f"**{n}**", inline=True)
-    e.add_field(name="⭐ Average rating", value=(f"**{avg:.1f} / 5**  {stars}" if n else "—"), inline=True)
-    if (BASE / "emojis" / "sb_star.png").exists():
-        e.set_thumbnail(url="attachment://logo.png")
-    e.set_footer(text="Simple Boosts · Thank you for your support 💜")
+        description=(f"{em('sb_star','⭐')} **Leave a vouch** with **`/vouch`** "
+                     f"(order · rating · comment)\n"
+                     f"**{n}** vouches · avg **{rating}**"))
     return e
 
 
@@ -578,11 +569,7 @@ async def update_vouch_sticky(guild):
         except Exception:
             pass
     try:
-        star = BASE / "emojis" / "sb_star.png"
-        kwargs = {"embed": vouch_sticky_embed()}
-        if star.exists():
-            kwargs["file"] = discord.File(star, filename="logo.png")
-        msg = await ch.send(**kwargs)
+        msg = await ch.send(embed=vouch_sticky_embed())
         store.config["vouch_sticky_id"] = msg.id
         store.save()
     except Exception as ex:
