@@ -19,6 +19,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import aiohttp
+try:
+    from PIL import Image, ImageDraw, ImageFont
+    HAVE_PIL = True
+except Exception:
+    HAVE_PIL = False
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -1263,6 +1268,119 @@ a{{color:#00a8fc}}
 <div class="wrap">{body}</div></body></html>'''
 
 
+FONT_DIR = BASE / "fonts"
+
+
+def _font(name, size):
+    try:
+        return ImageFont.truetype(str(FONT_DIR / name), size)
+    except Exception:
+        return ImageFont.load_default()
+
+
+def _wrap(text, font, maxw):
+    out = []
+    for raw in (text or "").split("\n"):
+        if not raw:
+            out.append("")
+            continue
+        cur = ""
+        for w in raw.split(" "):
+            t = (cur + " " + w).strip()
+            if font.getlength(t) <= maxw:
+                cur = t
+            else:
+                if cur:
+                    out.append(cur)
+                while font.getlength(w) > maxw and len(w) > 1:
+                    cut = len(w)
+                    while cut > 1 and font.getlength(w[:cut]) > maxw:
+                        cut -= 1
+                    out.append(w[:cut])
+                    w = w[cut:]
+                cur = w
+        out.append(cur)
+    return out
+
+
+async def _avatar_circle(author, size):
+    im = None
+    try:
+        s = await _http()
+        url = author.display_avatar.replace(size=64, static_format="png").url
+        async with s.get(str(url), timeout=aiohttp.ClientTimeout(total=10)) as r:
+            data = await r.read()
+        im = Image.open(io.BytesIO(data)).convert("RGBA").resize((size, size))
+    except Exception:
+        im = Image.new("RGBA", (size, size), (138, 77, 255, 255))
+    mask = Image.new("L", (size, size), 0)
+    ImageDraw.Draw(mask).ellipse([0, 0, size, size], fill=255)
+    out = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    out.paste(im, (0, 0), mask)
+    return out
+
+
+async def render_transcript_image(channel, messages, closer):
+    if not HAVE_PIL:
+        return None
+    W, PAD, AV, GAP, LH = 920, 24, 40, 14, 20
+    fn, ft, fb = _font("DejaVuSans-Bold.ttf", 16), _font("DejaVuSans.ttf", 12), _font("DejaVuSans.ttf", 15)
+    bodyw = W - PAD * 2 - AV - GAP
+    msgs = messages[-70:]            # cap for sane image size
+    trimmed = len(messages) - len(msgs)
+    blocks = []
+    total = PAD + 46
+    for m in msgs:
+        lines = _wrap(m.content, fb, bodyw) if m.content else []
+        extra = [f"📎 {a.filename}" for a in m.attachments]
+        for eb in m.embeds:
+            if eb.title:
+                extra.append(f"▎{eb.title}")
+            if eb.description:
+                extra += ["▎" + x for x in _wrap(eb.description, fb, bodyw - 10)][:4]
+        rows = max(1, len(lines) + len(extra))
+        h = 26 + rows * LH + 10
+        blocks.append((m, lines, extra, h))
+        total += h
+    total += PAD
+    img = Image.new("RGBA", (W, total), (49, 51, 56, 255))
+    dr = ImageDraw.Draw(img)
+    # header band
+    dr.rectangle([0, 0, W, PAD + 40], fill=(43, 45, 49, 255))
+    dr.text((PAD, PAD - 2), f"#{channel.name}", font=fn, fill=(255, 255, 255, 255))
+    sub = f"{len(messages)} messages · closed by {closer} · {now().strftime('%d %b %Y %H:%M')} UTC"
+    dr.text((PAD, PAD + 18), sub, font=ft, fill=(148, 155, 164, 255))
+    y = PAD + 46
+    if trimmed > 0:
+        dr.text((PAD, y), f"… earlier {trimmed} messages not shown …", font=ft, fill=(148, 155, 164, 255))
+        y += LH
+    avatars = {}
+    for m, _l, _e, _h in blocks:
+        if m.author.id not in avatars:
+            avatars[m.author.id] = await _avatar_circle(m.author, AV)
+    for m, lines, extra, h in blocks:
+        img.alpha_composite(avatars[m.author.id], (PAD, y))
+        tx = PAD + AV + GAP
+        name = m.author.display_name
+        col = (173, 134, 255, 255) if m.author.bot else (255, 255, 255, 255)
+        dr.text((tx, y), name, font=fn, fill=col)
+        nw = fn.getlength(name)
+        dr.text((tx + nw + 8, y + 3), m.created_at.strftime("%d %b %H:%M"), font=ft, fill=(148, 155, 164, 255))
+        yy = y + 24
+        for ln in lines:
+            dr.text((tx, yy), ln, font=fb, fill=(219, 222, 225, 255))
+            yy += LH
+        for ex in extra:
+            colr = (0, 168, 252, 255) if ex.startswith("📎") else (185, 160, 240, 255)
+            dr.text((tx, yy), ex, font=fb, fill=colr)
+            yy += LH
+        y += h
+    buf = io.BytesIO()
+    img.convert("RGB").save(buf, "PNG", optimize=True)
+    buf.seek(0)
+    return buf
+
+
 async def close_ticket(channel, closer):
     try:
         messages = [m async for m in channel.history(limit=None, oldest_first=True)]
@@ -1273,8 +1391,6 @@ async def close_ticket(channel, closer):
     opener_id = meta.get("opener")
     tch = await _transcript_channel(channel.guild)
     if tch:
-        fobj = discord.File(io.BytesIO(html_doc.encode("utf-8")),
-                            filename=f"{channel.name}.html")
         e = discord.Embed(title="📑 Ticket transcript", colour=ACCENT,
                           description=f"**Ticket:** #{channel.name}\n"
                                       f"**Opened by:** <@{opener_id}>\n"
@@ -1285,8 +1401,16 @@ async def close_ticket(channel, closer):
         if meta.get("pay"):
             e.add_field(name="Payment", value=meta["pay"])
         e.timestamp = now()
+        files = [discord.File(io.BytesIO(html_doc.encode("utf-8")), filename=f"{channel.name}.html")]
         try:
-            await tch.send(embed=e, file=fobj)
+            img = await render_transcript_image(channel, messages, closer)
+            if img:
+                files.insert(0, discord.File(img, filename=f"{channel.name}.png"))
+                e.set_image(url=f"attachment://{channel.name}.png")
+        except Exception as ex:
+            print("transcript image:", ex)
+        try:
+            await tch.send(embed=e, files=files)
         except Exception as ex:
             print("transcript send:", ex)
     if str(channel.id) in store.tickets:
@@ -1506,6 +1630,15 @@ class PaymentPanelView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
+    @discord.ui.button(label="Price List", emoji="🏷️",
+                       style=discord.ButtonStyle.secondary, custom_id="pay:prices")
+    async def pricelist(self, i: discord.Interaction, b: discord.ui.Button):
+        f = prices_file()
+        if f:
+            await i.response.send_message(embed=prices_embed(), file=f, ephemeral=True)
+        else:
+            await i.response.send_message(embed=prices_embed(), ephemeral=True)
+
     @discord.ui.button(label="Set Order", emoji="💲",
                        style=discord.ButtonStyle.primary, custom_id="pay:set")
     async def setorder(self, i: discord.Interaction, b: discord.ui.Button):
@@ -1628,8 +1761,7 @@ async def ticket_setrole(i: discord.Interaction, role: discord.Role):
 
 
 # ===================================================================== PRICES
-@bot.tree.command(name="prices", description="🏷️ Boost price list")
-async def prices_cmd(i: discord.Interaction):
+def prices_embed():
     arr = em("sb_arrow", "›")
     rows = "\n".join(f"{arr} **{qty} boosts** — **${price:.2f}**" for qty, price in PRICE_LIST.items())
     paytxt = "   ".join(f"{em('sb_'+n.lower())} **{n}**" + (f" `+{f}`" if f else " `free`")
@@ -1640,12 +1772,23 @@ async def prices_cmd(i: discord.Interaction):
         description=f"1-month Discord server boosts · instant delivery 💜\n\n{rows}")
     e.add_field(name="💳 Payment methods", value=f"{paytxt}\n*LTC free · USDT & BTC +$1*", inline=False)
     e.set_footer(text="Simple Boosts · Open a ticket to order")
-    logo = BASE / "emojis" / "sb_boost.png"
-    if logo.exists():
+    if (BASE / "emojis" / "sb_boost.png").exists():
         e.set_thumbnail(url="attachment://logo.png")
-        await i.response.send_message(embed=e, file=discord.File(logo, filename="logo.png"))
+    return e
+
+
+def prices_file():
+    logo = BASE / "emojis" / "sb_boost.png"
+    return discord.File(logo, filename="logo.png") if logo.exists() else None
+
+
+@bot.tree.command(name="prices", description="🏷️ Boost price list")
+async def prices_cmd(i: discord.Interaction):
+    f = prices_file()
+    if f:
+        await i.response.send_message(embed=prices_embed(), file=f)
     else:
-        await i.response.send_message(embed=e)
+        await i.response.send_message(embed=prices_embed())
 
 
 # ===================================================================== HELP
