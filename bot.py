@@ -1109,31 +1109,128 @@ def pay_fee_usd(coin):
         return 0.0
 
 
-def invoice_embed(inv):
+def _payment_uri(coin, addr, amount):
+    if coin == "BTC":
+        return f"bitcoin:{addr}?amount={amount}"
+    if coin == "LTC":
+        return f"litecoin:{addr}?amount={amount}"
+    return addr   # USDT (BEP-20): plain address
+
+
+def make_qr(data):
+    try:
+        import qrcode
+        img = qrcode.make(data, border=2, box_size=8).convert("RGB")
+        buf = io.BytesIO()
+        img.save(buf, "PNG")
+        buf.seek(0)
+        return buf
+    except Exception as ex:
+        print("qr:", ex)
+        return None
+
+
+def invoice_embed(inv, paid=False):
     coin = inv["coin"]
     pe = em(f"sb_{coin.lower()}")
     chain = f"  ·  {USDT_CHAIN_LABEL}" if coin == "USDT" else ""
-    e = discord.Embed(
-        title=f"{pe}  Payment — {coin}{chain}",
-        colour=ACCENT,
-        description=(f"Please send **exactly** this amount:\n\n"
-                    f"# `{inv['amount']}` {coin}\n"
-                    f"≈ **${inv['usd']:.2f}**\n\n"
-                    f"To this address:\n```{inv['address']}```"))
-    e.add_field(
-        name="⚠️ Important",
-        value=("Send the **exact** amount shown.\n"
-               "If you send **less than the amount**, you'll have to **wait for a staff "
-               "member to send it back** (refund). Please don't send extra."),
-        inline=False)
-    e.add_field(
-        name="📋 How to pay",
-        value=("› Tap **📋 Copy Address** to copy the address\n"
-               "› Send the exact amount above\n"
-               "› Tap **🔔 Track My Payment** to check it landed"),
-        inline=False)
-    e.set_footer(text="Staff: 🔎 Check Payment to confirm in full")
+    if paid:
+        e = discord.Embed(
+            title=f"{em('sb_check','✅')}  Payment Received — {coin}",
+            colour=GOOD,
+            description="**Paid in full** — your order is being processed. 💜")
+    else:
+        e = discord.Embed(
+            title=f"{pe}  Payment — {coin}{chain}",
+            colour=ACCENT,
+            description="📲 **Scan the QR** below, or tap **📋 Copy Address** to pay.")
+    e.add_field(name="💰 Amount", value=f"**`{inv['amount']}`** {coin}\n≈ **${inv['usd']:.2f}**", inline=True)
+    e.add_field(name="📊 Status", value=("🟢 **Paid**" if paid else "🟡 **Awaiting payment**"), inline=True)
+    if inv.get("qty"):
+        e.add_field(name="🚀 Order", value=f"**{inv['qty']}** boosts", inline=True)
+    e.add_field(name="🏦 Address", value=f"```{inv['address']}```", inline=False)
+    if not paid:
+        e.add_field(
+            name="⚠️ Important",
+            value="Send the **exact** amount. Underpay → **wait for a staff refund**. Please don't overpay.",
+            inline=False)
+        if inv.get("qr"):
+            e.set_image(url="attachment://qr.png")
+    e.set_footer(text="Simple Boosts · 🔴 live payment tracking")
     return e
+
+
+def paid_embed(inv, res):
+    boost = em("sb_boost", "🎉")
+    tag = "✅ Confirmed" if res.get("confirmed") else "🕓 Detected (confirming on-chain)"
+    e = discord.Embed(
+        title=f"{boost}  Payment Received!  {boost}",
+        colour=GOOD,
+        description=("We've detected your payment on the blockchain. ✅\n\n"
+                     f"**Amount:** {res['received']:.8f} {inv['coin']}  (≈ ${inv['usd']:.2f})\n"
+                     f"**Status:** {tag}\n\n"
+                     "Thank you for your order — a staff member will complete it shortly. 💜"))
+    if (BASE / "emojis" / "sb_check.png").exists():
+        e.set_thumbnail(url="attachment://logo.png")
+    e.set_footer(text="Simple Boosts")
+    e.timestamp = now()
+    return e
+
+
+async def complete_payment(channel, meta, inv, res):
+    """Mark an invoice paid once: announce a Payment Received embed and flip the
+    panel to its paid state. Safe to call from the loop or the buttons."""
+    if inv.get("announced"):
+        return
+    inv["paid"] = True
+    inv["announced"] = True
+    store.save()
+    opener = meta.get("opener")
+    role = channel.guild.get_role(ticket_role_id(channel.guild))
+    ping = " ".join(x for x in [f"<@{opener}>" if opener else "", role.mention if role else ""] if x)
+    logo = BASE / "emojis" / "sb_check.png"
+    try:
+        kwargs = {"content": ping, "embed": paid_embed(inv, res),
+                  "allowed_mentions": discord.AllowedMentions(users=True, roles=True)}
+        if logo.exists():
+            kwargs["file"] = discord.File(logo, filename="logo.png")
+        await channel.send(**kwargs)
+    except Exception as ex:
+        print("paid announce:", ex)
+    pid = meta.get("panel_msg")
+    if pid:
+        try:
+            await channel.get_partial_message(int(pid)).edit(
+                embed=invoice_embed(inv, paid=True), view=None, attachments=[])
+        except Exception:
+            pass
+
+
+async def payment_loop():
+    """Live auto-detection: poll open invoices and complete them when paid."""
+    await bot.wait_until_ready()
+    while not bot.is_closed():
+        try:
+            for cid, meta in list(store.tickets.items()):
+                inv = meta.get("invoice")
+                if not inv or inv.get("paid") or meta.get("closed"):
+                    continue
+                try:
+                    age = (now() - datetime.fromisoformat(inv["at"])).total_seconds()
+                except Exception:
+                    age = 0
+                if age > 7200:          # stop auto-polling after 2h
+                    continue
+                ch = bot.get_channel(int(cid))
+                if ch is None:
+                    continue
+                res = await address_received(inv["coin"], inv["address"], inv["amount"], inv["at"])
+                if res["status"] == "paid":
+                    await complete_payment(ch, meta, inv, res)
+                await asyncio.sleep(2)   # space out API calls
+        except Exception as ex:
+            print("payment loop:", ex)
+        await asyncio.sleep(30)
 
 
 # ==================================================================== TICKETS
@@ -1626,28 +1723,28 @@ class SetOrderModal(discord.ui.Modal, title="Set order total"):
         except Exception as ex:
             return await i.followup.send(f"Couldn't fetch the live {self.coin} rate ({ex}). Try again.",
                                          ephemeral=True)
+        qr = make_qr(_payment_uri(self.coin, addr, amount))
+        inv = {"coin": self.coin, "address": addr, "usd": total, "qty": qty,
+               "amount": amount, "rate": rate, "at": now().isoformat(),
+               "paid": False, "announced": False, "qr": bool(qr)}
         meta = store.tickets.get(str(i.channel.id), {})
-        meta["invoice"] = {"coin": self.coin, "address": addr, "usd": total, "qty": qty,
-                           "amount": amount, "rate": rate, "at": now().isoformat(), "paid": False}
+        meta["invoice"] = inv
+        # replace the single payment panel (delete old, post fresh QR invoice) — no flooding
+        old = meta.get("panel_msg")
+        if old:
+            try:
+                await i.channel.get_partial_message(int(old)).delete()
+            except Exception:
+                pass
+        send_kwargs = {"embed": invoice_embed(inv), "view": PaymentPanelView()}
+        if qr:
+            send_kwargs["file"] = discord.File(qr, filename="qr.png")
+        sent = await i.channel.send(**send_kwargs)
+        meta["panel_msg"] = sent.id
         store.tickets[str(i.channel.id)] = meta
         store.save()
-        # Update the ONE payment panel in place (no new embeds flooding the ticket)
-        edited = False
-        pid = meta.get("panel_msg")
-        if pid:
-            try:
-                await i.channel.get_partial_message(int(pid)).edit(
-                    embed=invoice_embed(meta["invoice"]), view=PaymentPanelView())
-                edited = True
-            except Exception:
-                edited = False
-        if not edited:
-            sent = await i.channel.send(embed=invoice_embed(meta["invoice"]), view=PaymentPanelView())
-            meta["panel_msg"] = sent.id
-            store.tickets[str(i.channel.id)] = meta
-            store.save()
-        await i.followup.send(f"{em('sb_check','✅')} Invoice set — ${total:.2f} in {self.coin}.",
-                              ephemeral=True)
+        await i.followup.send(f"{em('sb_check','✅')} Invoice set — ${total:.2f} in {self.coin}. "
+                              "The bot is now watching the blockchain live. 🔴", ephemeral=True)
 
 
 class PaymentPanelView(discord.ui.View):
@@ -1690,6 +1787,7 @@ class PaymentPanelView(discord.ui.View):
         res = await address_received(inv["coin"], inv["address"], inv["amount"], inv["at"])
         coin, st = inv["coin"], res["status"]
         if st == "paid":
+            await complete_payment(i.channel, meta, inv, res)   # posts the public Received embed
             msg = (f"✅ **Payment detected!** We've seen your **{coin}** on the blockchain. "
                    f"Staff will confirm and complete your order shortly. 💜")
         elif st == "partial":
@@ -1727,18 +1825,14 @@ class PaymentPanelView(discord.ui.View):
         if not inv:
             return await i.response.send_message(
                 "No invoice yet — press **💲 Set Order** first.", ephemeral=True)
-        await i.response.defer()
+        await i.response.defer(ephemeral=True)
         res = await address_received(inv["coin"], inv["address"], inv["amount"], inv["at"])
         coin = inv["coin"]
         st = res["status"]
         if st == "paid":
-            inv["paid"] = True
-            store.save()
-            tag = "✅ confirmed" if res["confirmed"] else "🕓 detected (awaiting confirmations)"
-            e = discord.Embed(title=f"{em('sb_check','✅')} Payment received — in full",
-                              colour=GOOD,
-                              description=f"Received **{res['received']:.8f} {coin}** "
-                                          f"(needed `{inv['amount']}`).\nStatus: {tag}")
+            await complete_payment(i.channel, meta, inv, res)   # posts the public Received embed + flips panel
+            return await i.followup.send(
+                f"{em('sb_check','✅')} Confirmed — received {res['received']:.8f} {coin}.", ephemeral=True)
         elif st == "partial":
             short = inv["amount"] - res["received"]
             e = discord.Embed(title="⚠️ Underpaid",
@@ -1992,6 +2086,7 @@ async def setup_hook():
     bot.add_view(TicketCloseView())
     bot.add_view(PaymentPanelView())
     bot.loop.create_task(giveaway_loop())
+    bot.loop.create_task(payment_loop())
 
 
 _synced = False
