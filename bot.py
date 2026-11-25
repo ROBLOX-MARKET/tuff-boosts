@@ -734,28 +734,26 @@ def gw_embed(gw):
     end = datetime.fromisoformat(gw["end"])
     ended = gw.get("ended")
     ts = int(end.timestamp())
-    boost = em("sb_boost", "🎉")
-    star = em("sb_star", "⭐")
     n = len(gw.get("entrants", []))
     if ended:
-        desc = (f"{star}  **This giveaway has ended!**\n"
-                f"Thanks to everyone who entered — winners are below. 💜")
+        desc = "🎊  **This giveaway has ended!**\nThanks to everyone who entered — winners below. 💜"
     else:
-        desc = (f"{boost}  **GIVEAWAY**  {boost}\n\n"
-                f"Press **🎉 Enter** below for your chance to win!\n"
-                f"Ends <t:{ts}:R>  •  <t:{ts}:f>")
+        desc = ("Click **🎉 Enter** below for your chance to win!\n"
+                f"​")
     e = discord.Embed(
-        title=f"🎁  {gw['prize']}",
+        title=f"🎁   {gw['prize']}",
         colour=0x5A2DA6 if ended else ACCENT,
         description=desc)
-    e.add_field(name="🏆 Winners", value=f"**{gw['winners']}**", inline=True)
-    e.add_field(name="👥 Entries", value=f"**{n}**", inline=True)
-    e.add_field(name="🎀 Host", value=f"<@{gw['host_id']}>", inline=True)
+    e.add_field(name="⏰ Ends" if not ended else "⏰ Ended",
+                value=f"<t:{ts}:R>" if not ended else f"<t:{ts}:f>", inline=True)
+    e.add_field(name="🏆 Winners", value=f"`{gw['winners']}`", inline=True)
+    e.add_field(name="🎟️ Entries", value=f"`{n}`", inline=True)
     reqs = requirement_lines(gw)
     if reqs:
         e.add_field(name="📋 Requirements to enter", value="\n".join(reqs), inline=False)
-    if (BASE / "emojis" / "sb_boost.png").exists():
-        e.set_thumbnail(url="attachment://logo.png")
+    e.add_field(name="🎀 Hosted by", value=f"<@{gw['host_id']}>", inline=False)
+    if BANNER_FILE.exists():
+        e.set_image(url="attachment://banner.gif")
     e.set_footer(text="Simple Boosts  •  Good luck! 🍀")
     e.timestamp = end
     return e
@@ -764,6 +762,10 @@ def gw_embed(gw):
 def _gw_logo():
     p = BASE / "emojis" / "sb_boost.png"
     return discord.File(p, filename="logo.png") if p.exists() else None
+
+
+def _gw_banner():
+    return discord.File(BANNER_FILE, filename="banner.gif") if BANNER_FILE.exists() else None
 
 
 giveaway_group = app_commands.Group(name="giveaway", description="Giveaways",
@@ -807,10 +809,10 @@ async def gw_create(i: discord.Interaction, duration: str, winners: int, prize: 
           "req_period": (message_period.value if message_period else "all"),
           "req_age_days": max(0, min_account_age_days)}
     await i.response.send_message(f"{em('sb_check','✅')} Giveaway started!", ephemeral=True)
-    logo = _gw_logo()
+    banner = _gw_banner()
     kwargs = {"embed": gw_embed(gw), "view": GiveawayView()}
-    if logo:
-        kwargs["file"] = logo
+    if banner:
+        kwargs["file"] = banner
     msg = await i.channel.send(**kwargs)
     store.giveaways[str(msg.id)] = gw
     store.save()
@@ -1736,7 +1738,7 @@ class SetOrderModal(discord.ui.Modal, title="Set order total"):
                 await i.channel.get_partial_message(int(old)).delete()
             except Exception:
                 pass
-        send_kwargs = {"embed": invoice_embed(inv), "view": PaymentPanelView()}
+        send_kwargs = {"embed": invoice_embed(inv), "view": InvoicePanelView()}
         if qr:
             send_kwargs["file"] = discord.File(qr, filename="qr.png")
         sent = await i.channel.send(**send_kwargs)
@@ -1747,13 +1749,103 @@ class SetOrderModal(discord.ui.Modal, title="Set order total"):
                               "The bot is now watching the blockchain live. 🔴", ephemeral=True)
 
 
+# --- shared payment-button actions (used by both the pre-order and invoice panels) ---
+async def _pay_copy(i):
+    meta = store.tickets.get(str(i.channel.id), {})
+    inv = meta.get("invoice")
+    addr = (inv or {}).get("address") or shop_address(meta.get("pay"))
+    if not addr:
+        return await i.response.send_message("No address set yet.", ephemeral=True)
+    if inv:
+        await i.response.send_message(
+            f"Send **{inv['amount']} {inv['coin']}** (≈ ${inv['usd']:.2f}) to:\n`{addr}`", ephemeral=True)
+    else:
+        await i.response.send_message(f"`{addr}`", ephemeral=True)
+
+
+async def _pay_track(i):
+    meta = store.tickets.get(str(i.channel.id), {})
+    inv = meta.get("invoice")
+    if not inv:
+        return await i.response.send_message(
+            "⏳ Staff haven't set your total yet — hang tight!", ephemeral=True)
+    await i.response.defer(ephemeral=True)
+    res = await address_received(inv["coin"], inv["address"], inv["amount"], inv["at"])
+    coin, st = inv["coin"], res["status"]
+    if st == "paid":
+        await complete_payment(i.channel, meta, inv, res)
+        msg = (f"✅ **Payment detected!** We've seen your **{coin}** on the blockchain. "
+               f"Staff will confirm and complete your order shortly. 💜")
+    elif st == "partial":
+        msg = (f"⚠️ We detected **{res['received']:.8f} {coin}**, but your order is "
+               f"**{inv['amount']} {coin}**. That's **underpaid** — please **wait for a staff "
+               f"member to send it back** (refund). Don't send more.")
+    elif st == "none":
+        msg = (f"⏳ **Not detected yet.** Make sure you sent **exactly `{inv['amount']}` {coin}** "
+               f"to the address, then tap this again in a minute.")
+    elif st == "manual":
+        msg = "⏳ USDT payments are confirmed manually by staff — they'll sort it shortly."
+    else:
+        msg = "⚠️ Couldn't reach the blockchain right now — try again in a moment."
+    await i.followup.send(msg, ephemeral=True)
+
+
+async def _pay_setorder(i):
+    if not is_ticket_staff(i.user):
+        return await i.response.send_message("🔒 Staff only.", ephemeral=True)
+    meta = store.tickets.get(str(i.channel.id), {})
+    coin = meta.get("pay")
+    if coin not in COIN_IDS:
+        return await i.response.send_message(
+            "This isn't a purchase ticket with a coin selected.", ephemeral=True)
+    await i.response.send_modal(SetOrderModal(coin))
+
+
+async def _pay_check(i):
+    if not is_ticket_staff(i.user):
+        return await i.response.send_message("🔒 Staff only.", ephemeral=True)
+    meta = store.tickets.get(str(i.channel.id), {})
+    inv = meta.get("invoice")
+    if not inv:
+        return await i.response.send_message(
+            "No invoice yet — press **💲 Set Order** first.", ephemeral=True)
+    await i.response.defer(ephemeral=True)
+    res = await address_received(inv["coin"], inv["address"], inv["amount"], inv["at"])
+    coin = inv["coin"]
+    st = res["status"]
+    if st == "paid":
+        await complete_payment(i.channel, meta, inv, res)
+        return await i.followup.send(
+            f"{em('sb_check','✅')} Confirmed — received {res['received']:.8f} {coin}.", ephemeral=True)
+    if st == "partial":
+        short = inv["amount"] - res["received"]
+        e = discord.Embed(title="⚠️ Underpaid", colour=WARN,
+                          description=(f"Received **{res['received']:.8f} {coin}** but the order is "
+                                       f"`{inv['amount']}` {coin} (${inv['usd']:.2f}).\n"
+                                       f"Short by **~{short:.8f} {coin}**.\n\n"
+                                       f"🔁 The customer must **wait for a staff member to send it "
+                                       f"back** (refund the underpayment)."))
+    elif st == "none":
+        e = discord.Embed(title="⏳ No payment yet", colour=BAD,
+                          description=f"No incoming **{coin}** of `{inv['amount']}` found yet.")
+    elif st == "manual":
+        e = discord.Embed(title="🔎 Verify USDT manually", colour=WARN,
+                          description=("Automatic USDT (BEP-20) checks need a free **BscScan API key** "
+                                       "set as `BSCSCAN_API_KEY`. Until then, verify on bscscan.com."))
+    else:
+        e = discord.Embed(title="⚠️ Couldn't check right now", colour=BAD,
+                          description="The blockchain lookup failed — try again in a moment.")
+    await i.followup.send(embed=e, ephemeral=True)
+
+
 class PaymentPanelView(discord.ui.View):
+    """Shown before an order is set — includes the Price List button."""
     def __init__(self):
         super().__init__(timeout=None)
 
     @discord.ui.button(label="Price List", emoji="🏷️",
                        style=discord.ButtonStyle.secondary, custom_id="pay:prices", row=0)
-    async def pricelist(self, i: discord.Interaction, b: discord.ui.Button):
+    async def pricelist(self, i, b):
         f = prices_file()
         if f:
             await i.response.send_message(embed=prices_embed(), file=f, ephemeral=True)
@@ -1762,102 +1854,49 @@ class PaymentPanelView(discord.ui.View):
 
     @discord.ui.button(label="Copy Address", emoji="📋",
                        style=discord.ButtonStyle.secondary, custom_id="pay:copy", row=0)
-    async def copyaddr(self, i: discord.Interaction, b: discord.ui.Button):
-        meta = store.tickets.get(str(i.channel.id), {})
-        inv = meta.get("invoice")
-        addr = (inv or {}).get("address") or shop_address(meta.get("pay"))
-        if not addr:
-            return await i.response.send_message("No address set yet.", ephemeral=True)
-        if inv:
-            await i.response.send_message(
-                f"Send **{inv['amount']} {inv['coin']}** (≈ ${inv['usd']:.2f}) to:\n`{addr}`",
-                ephemeral=True)
-        else:
-            await i.response.send_message(f"`{addr}`", ephemeral=True)
+    async def copyaddr(self, i, b):
+        await _pay_copy(i)
 
     @discord.ui.button(label="Track My Payment", emoji="🔔",
                        style=discord.ButtonStyle.primary, custom_id="pay:track", row=0)
-    async def track(self, i: discord.Interaction, b: discord.ui.Button):
-        meta = store.tickets.get(str(i.channel.id), {})
-        inv = meta.get("invoice")
-        if not inv:
-            return await i.response.send_message(
-                "⏳ Staff haven't set your total yet — hang tight!", ephemeral=True)
-        await i.response.defer(ephemeral=True)
-        res = await address_received(inv["coin"], inv["address"], inv["amount"], inv["at"])
-        coin, st = inv["coin"], res["status"]
-        if st == "paid":
-            await complete_payment(i.channel, meta, inv, res)   # posts the public Received embed
-            msg = (f"✅ **Payment detected!** We've seen your **{coin}** on the blockchain. "
-                   f"Staff will confirm and complete your order shortly. 💜")
-        elif st == "partial":
-            msg = (f"⚠️ We detected **{res['received']:.8f} {coin}**, but your order is "
-                   f"**{inv['amount']} {coin}**. That's **underpaid** — please **wait for a staff "
-                   f"member to send it back** (refund). Don't send more.")
-        elif st == "none":
-            msg = (f"⏳ **Not detected yet.** Make sure you sent **exactly `{inv['amount']}` {coin}** "
-                   f"to the address, then tap this again in a minute.")
-        elif st == "manual":
-            msg = "⏳ USDT payments are confirmed manually by staff — they'll sort it shortly."
-        else:
-            msg = "⚠️ Couldn't reach the blockchain right now — try again in a moment."
-        await i.followup.send(msg, ephemeral=True)
+    async def track(self, i, b):
+        await _pay_track(i)
 
     @discord.ui.button(label="Set Order", emoji="💲",
                        style=discord.ButtonStyle.success, custom_id="pay:set", row=1)
-    async def setorder(self, i: discord.Interaction, b: discord.ui.Button):
-        if not is_ticket_staff(i.user):
-            return await i.response.send_message("🔒 Staff only.", ephemeral=True)
-        meta = store.tickets.get(str(i.channel.id), {})
-        coin = meta.get("pay")
-        if coin not in COIN_IDS:
-            return await i.response.send_message(
-                "This isn't a purchase ticket with a coin selected.", ephemeral=True)
-        await i.response.send_modal(SetOrderModal(coin))
+    async def setorder(self, i, b):
+        await _pay_setorder(i)
 
-    @discord.ui.button(label="Check Payment (staff)", emoji="🔎",
+    @discord.ui.button(label="Check Payment", emoji="🔎",
                        style=discord.ButtonStyle.secondary, custom_id="pay:check", row=1)
-    async def check(self, i: discord.Interaction, b: discord.ui.Button):
-        if not is_ticket_staff(i.user):
-            return await i.response.send_message("🔒 Staff only.", ephemeral=True)
-        meta = store.tickets.get(str(i.channel.id), {})
-        inv = meta.get("invoice")
-        if not inv:
-            return await i.response.send_message(
-                "No invoice yet — press **💲 Set Order** first.", ephemeral=True)
-        await i.response.defer(ephemeral=True)
-        res = await address_received(inv["coin"], inv["address"], inv["amount"], inv["at"])
-        coin = inv["coin"]
-        st = res["status"]
-        if st == "paid":
-            await complete_payment(i.channel, meta, inv, res)   # posts the public Received embed + flips panel
-            return await i.followup.send(
-                f"{em('sb_check','✅')} Confirmed — received {res['received']:.8f} {coin}.", ephemeral=True)
-        elif st == "partial":
-            short = inv["amount"] - res["received"]
-            e = discord.Embed(title="⚠️ Underpaid",
-                              colour=WARN,
-                              description=(f"Received **{res['received']:.8f} {coin}** but the order is "
-                                           f"`{inv['amount']}` {coin} (${inv['usd']:.2f}).\n"
-                                           f"Short by **~{short:.8f} {coin}**.\n\n"
-                                           f"🔁 The customer must **wait for a staff member to send it "
-                                           f"back** (refund the underpayment)."))
-        elif st == "none":
-            e = discord.Embed(title="⏳ No payment yet",
-                              colour=BAD,
-                              description=f"No incoming **{coin}** of `{inv['amount']}` found yet. "
-                                          f"Ask the customer to send it, then check again.")
-        elif st == "manual":
-            e = discord.Embed(title="🔎 Verify USDT manually",
-                              colour=WARN,
-                              description=("Automatic USDT (BEP-20) checks need a free **BscScan API "
-                                           "key** set as `BSCSCAN_API_KEY`. Until then, verify the "
-                                           "transfer on bscscan.com yourself."))
-        else:
-            e = discord.Embed(title="⚠️ Couldn't check right now",
-                              colour=BAD,
-                              description="The blockchain lookup failed — try again in a moment.")
-        await i.followup.send(embed=e)
+    async def check(self, i, b):
+        await _pay_check(i)
+
+
+class InvoicePanelView(discord.ui.View):
+    """Shown once an order is set — no Price List; clean customer + staff controls."""
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Copy Address", emoji="📋",
+                       style=discord.ButtonStyle.primary, custom_id="inv:copy", row=0)
+    async def copyaddr(self, i, b):
+        await _pay_copy(i)
+
+    @discord.ui.button(label="Track My Payment", emoji="🔔",
+                       style=discord.ButtonStyle.success, custom_id="inv:track", row=0)
+    async def track(self, i, b):
+        await _pay_track(i)
+
+    @discord.ui.button(label="Set Order", emoji="💲",
+                       style=discord.ButtonStyle.secondary, custom_id="inv:set", row=1)
+    async def setorder(self, i, b):
+        await _pay_setorder(i)
+
+    @discord.ui.button(label="Check Payment", emoji="🔎",
+                       style=discord.ButtonStyle.secondary, custom_id="inv:check", row=1)
+    async def check(self, i, b):
+        await _pay_check(i)
 
 
 ticket_group = app_commands.Group(name="ticket", description="Ticket system",
@@ -2085,6 +2124,7 @@ async def setup_hook():
     bot.add_view(TicketPanelView())
     bot.add_view(TicketCloseView())
     bot.add_view(PaymentPanelView())
+    bot.add_view(InvoicePanelView())
     bot.loop.create_task(giveaway_loop())
     bot.loop.create_task(payment_loop())
 
