@@ -18,6 +18,7 @@ import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import aiohttp
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -68,6 +69,23 @@ def em(name, fallback=""):
 def pay_label(name):
     fee = PAY_FEE.get(name)
     return f"{name} — **+{fee} fee**" if fee else f"{name} — **no fee**"
+
+
+# Boost price list (quantity -> USD sell price). Also powers /prices.
+PRICE_LIST = {2: 1.49, 4: 2.49, 6: 3.49, 10: 4.99, 14: 6.49, 16: 6.99,
+              18: 7.99, 20: 8.49, 24: 9.99, 28: 10.99, 30: 11.49}
+
+# Crypto payment settings (non-custodial: the bot only shows YOUR addresses
+# and reads the public blockchain — it never holds funds).
+COIN_IDS = {"BTC": "bitcoin", "LTC": "litecoin", "USDT": "tether"}
+# USDT here is BEP-20 (BNB Smart Chain). "BSC-USD" token, 18 decimals.
+USDT_BSC_CONTRACT = "0x55d398326f99059fF775485246999027B3197955"
+USDT_CHAIN_LABEL = "BEP-20 (BNB Smart Chain)"
+PAY_TOLERANCE = 0.98   # accept a payment that's within 2% of the exact amount
+
+
+def shop_address(coin):
+    return store.config.get(f"addr_{coin}")
 
 
 # ----------------------------------------------------------------- data store
@@ -316,6 +334,23 @@ async def setup_channels(i: discord.Interaction, modlog: discord.TextChannel = N
         store.config["orders_channel"] = orders.id
     store.save()
     await i.response.send_message("✅ Saved channel settings.", ephemeral=True)
+
+
+@setup_group.command(name="addresses", description="💰 Set YOUR crypto receiving addresses")
+@app_commands.describe(btc="Your BTC address", ltc="Your LTC address",
+                       usdt="Your USDT (BEP-20 / BNB Smart Chain) address")
+async def setup_addresses(i: discord.Interaction, btc: str = None, ltc: str = None, usdt: str = None):
+    if btc:
+        store.config["addr_BTC"] = btc.strip()
+    if ltc:
+        store.config["addr_LTC"] = ltc.strip()
+    if usdt:
+        store.config["addr_USDT"] = usdt.strip()
+    store.save()
+    cur = "\n".join(f"**{c}:** `{shop_address(c) or '— not set —'}`" for c in ["BTC", "LTC", "USDT"])
+    await i.response.send_message(
+        f"{em('sb_check','✅')} Saved. Current receiving addresses:\n{cur}\n\n"
+        f"*USDT is treated as {USDT_CHAIN_LABEL}.*", ephemeral=True)
 
 
 @setup_group.command(name="makechannel", description="📁 Create a channel as the bot")
@@ -964,6 +999,132 @@ async def buildserver(i: discord.Interaction):
         "(skips existing). Build it?", view=BuildConfirm(i.user.id), ephemeral=True)
 
 
+# =========================================================== CRYPTO PAYMENTS
+# Non-custodial: the bot only shows the owner's own addresses and reads public
+# block explorers to confirm an exact incoming payment. It never holds funds.
+_session = None
+
+
+async def _http():
+    global _session
+    if _session is None or _session.closed:
+        _session = aiohttp.ClientSession(headers={"User-Agent": "SimpleBoostsBot/1.0"})
+    return _session
+
+
+async def coin_usd(coin):
+    """Current USD price of 1 unit of the coin."""
+    if coin == "USDT":
+        return 1.0
+    s = await _http()
+    async with s.get("https://api.coingecko.com/api/v3/simple/price",
+                     params={"ids": COIN_IDS[coin], "vs_currencies": "usd"},
+                     timeout=aiohttp.ClientTimeout(total=15)) as r:
+        d = await r.json()
+    return float(d[COIN_IDS[coin]]["usd"])
+
+
+async def usd_to_amount(usd, coin):
+    """Convert a USD total into a unique exact crypto amount (so each order is
+    distinguishable on-chain). Returns (amount, rate)."""
+    rate = await coin_usd(coin)
+    amt = usd / rate
+    if coin == "USDT":
+        amt = round(amt + random.randint(1, 9) / 100.0, 2)          # +$0.01–0.09
+    else:
+        amt = round(amt + random.randint(1000, 9000) / 1e8, 8)      # +0.00001–0.00009
+    return amt, rate
+
+
+async def address_received(coin, address, expected, since_iso):
+    """Check the public blockchain for an incoming payment of ~expected to
+    `address` after `since_iso`. Returns dict(status, received, confirmed)."""
+    try:
+        since = int(datetime.fromisoformat(since_iso).timestamp())
+    except Exception:
+        since = 0
+    s = await _http()
+    best = 0.0
+    confirmed = False
+    try:
+        if coin in ("BTC", "LTC"):
+            base = "https://mempool.space/api" if coin == "BTC" else "https://litecoinspace.org/api"
+            async with s.get(f"{base}/address/{address}/txs",
+                             timeout=aiohttp.ClientTimeout(total=20)) as r:
+                txs = await r.json()
+            for tx in txs:
+                st = tx.get("status", {})
+                bt = st.get("block_time", 0) or 0
+                if st.get("confirmed") and bt and bt < since - 300:
+                    continue   # too old to be this order
+                sats = sum(v.get("value", 0) for v in tx.get("vout", [])
+                           if v.get("scriptpubkey_address") == address)
+                amt = sats / 1e8
+                if amt > best:
+                    best = amt
+                    confirmed = bool(st.get("confirmed"))
+        elif coin == "USDT":
+            # BEP-20 USDT on BNB Smart Chain, via BscScan (free API key recommended)
+            key = os.getenv("BSCSCAN_API_KEY", "").strip() or "YourApiKeyToken"
+            async with s.get("https://api.bscscan.com/api",
+                             params={"module": "account", "action": "tokentx",
+                                     "contractaddress": USDT_BSC_CONTRACT, "address": address,
+                                     "page": "1", "offset": "30", "sort": "desc", "apikey": key},
+                             timeout=aiohttp.ClientTimeout(total=20)) as r:
+                data = await r.json()
+            if str(data.get("status")) != "1":
+                return {"status": "manual", "received": 0.0, "confirmed": False,
+                        "note": data.get("message", "no BscScan key")}
+            for t in data.get("result", []):
+                if (t.get("to", "").lower() != address.lower()):
+                    continue
+                ts = int(t.get("timeStamp", 0) or 0)
+                if ts and ts < since - 300:
+                    continue
+                dec = int(t.get("tokenDecimal", 18) or 18)
+                amt = float(t.get("value", 0)) / (10 ** dec)
+                if amt > best:
+                    best = amt
+                    confirmed = int(t.get("confirmations", 0) or 0) >= 10
+    except Exception as ex:
+        return {"status": "error", "received": 0.0, "confirmed": False, "error": str(ex)}
+
+    if best >= expected * PAY_TOLERANCE:
+        return {"status": "paid", "received": best, "confirmed": confirmed}
+    if best > 0:
+        return {"status": "partial", "received": best, "confirmed": confirmed}
+    return {"status": "none", "received": 0.0, "confirmed": False}
+
+
+def pay_fee_usd(coin):
+    f = PAY_FEE.get(coin)
+    try:
+        return float(str(f).replace("$", "")) if f else 0.0
+    except ValueError:
+        return 0.0
+
+
+def invoice_embed(inv):
+    coin = inv["coin"]
+    pe = em(f"sb_{coin.lower()}")
+    chain = f"  ·  {USDT_CHAIN_LABEL}" if coin == "USDT" else ""
+    e = discord.Embed(
+        title=f"{pe}  Payment — {coin}{chain}",
+        colour=ACCENT,
+        description=(f"Please send **exactly** this amount:\n\n"
+                    f"# `{inv['amount']}` {coin}\n"
+                    f"≈ **${inv['usd']:.2f}**\n\n"
+                    f"To this address:\n```{inv['address']}```"))
+    e.add_field(
+        name="⚠️ Important",
+        value=("Send the **exact** amount shown.\n"
+               "If you send **less than the amount**, you'll have to **wait for a staff "
+               "member to send it back** (refund). Please don't send extra."),
+        inline=False)
+    e.set_footer(text="Staff: press 🔎 Check Payment once it's been sent")
+    return e
+
+
 # ==================================================================== TICKETS
 TICKET_CAT = "🎫 Tickets"
 TRANSCRIPT_NAME = "📑┃transcripts"
@@ -1199,6 +1360,23 @@ async def open_ticket(i, kind, pay=None, invoice=None):
     await ch.send(content=f"{ping} {i.user.mention}".strip(),
                   embed=e, view=TicketCloseView(),
                   allowed_mentions=discord.AllowedMentions(roles=True, users=True))
+    if kind == "buy":
+        addr = shop_address(pay)
+        pe = em(f"sb_{pay.lower()}")
+        chain = f"  ·  {USDT_CHAIN_LABEL}" if pay == "USDT" else ""
+        if addr:
+            pm = discord.Embed(
+                title=f"{pe}  Payment — {pay}{chain}",
+                colour=ACCENT,
+                description=(f"Our **{pay}** address:\n```{addr}```\n"
+                            "A staff member will set your total with **💲 Set Order**, which shows the "
+                            "**exact amount** to send.\n\n"
+                            "⚠️ Send the **exact** amount. If you send **less than the amount**, you'll "
+                            "have to **wait for a staff member to send it back** (refund)."))
+            pm.set_footer(text="Staff: press 💲 Set Order to create the invoice")
+            await ch.send(embed=pm, view=PaymentPanelView())
+        else:
+            await ch.send("⚠️ Payment addresses aren't set up yet — owner, run `/setup addresses`.")
     await i.followup.send(f"{em('sb_check','✅')} Ticket created: {ch.mention}", ephemeral=True)
 
 
@@ -1273,6 +1451,122 @@ class TicketCloseView(discord.ui.View):
         await close_ticket(i.channel, i.user)
 
 
+class SetOrderModal(discord.ui.Modal, title="Set order total"):
+    boosts = discord.ui.TextInput(label="Boosts quantity (from the price list)",
+                                  required=False, placeholder="e.g. 14")
+    custom = discord.ui.TextInput(label="…or a custom price in USD",
+                                  required=False, placeholder="e.g. 7.50")
+
+    def __init__(self, coin):
+        super().__init__()
+        self.coin = coin
+
+    async def on_submit(self, i: discord.Interaction):
+        qty = None
+        base = None
+        if self.boosts.value.strip():
+            try:
+                qty = int(self.boosts.value.strip())
+            except ValueError:
+                return await i.response.send_message("Enter a whole number of boosts.", ephemeral=True)
+            base = PRICE_LIST.get(qty)
+            if base is None:
+                return await i.response.send_message(
+                    f"**{qty}** isn't a listed pack. Use the custom price field instead.", ephemeral=True)
+        elif self.custom.value.strip():
+            try:
+                base = float(self.custom.value.replace("$", "").strip())
+            except ValueError:
+                return await i.response.send_message("Enter a valid USD amount.", ephemeral=True)
+        else:
+            return await i.response.send_message("Fill in a boosts quantity or a custom price.", ephemeral=True)
+
+        addr = shop_address(self.coin)
+        if not addr:
+            return await i.response.send_message(
+                f"⚠️ No {self.coin} address set. Owner: run `/setup addresses`.", ephemeral=True)
+        total = round(base + pay_fee_usd(self.coin), 2)
+        await i.response.defer(ephemeral=True)
+        try:
+            amount, rate = await usd_to_amount(total, self.coin)
+        except Exception as ex:
+            return await i.followup.send(f"Couldn't fetch the live {self.coin} rate ({ex}). Try again.",
+                                         ephemeral=True)
+        meta = store.tickets.get(str(i.channel.id), {})
+        meta["invoice"] = {"coin": self.coin, "address": addr, "usd": total, "qty": qty,
+                           "amount": amount, "rate": rate, "at": now().isoformat(), "paid": False}
+        store.tickets[str(i.channel.id)] = meta
+        store.save()
+        await i.followup.send(f"{em('sb_check','✅')} Invoice set — ${total:.2f} in {self.coin}.",
+                              ephemeral=True)
+        await i.channel.send(embed=invoice_embed(meta["invoice"]), view=PaymentPanelView())
+
+
+class PaymentPanelView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Set Order", emoji="💲",
+                       style=discord.ButtonStyle.primary, custom_id="pay:set")
+    async def setorder(self, i: discord.Interaction, b: discord.ui.Button):
+        if not is_ticket_staff(i.user):
+            return await i.response.send_message("🔒 Staff only.", ephemeral=True)
+        meta = store.tickets.get(str(i.channel.id), {})
+        coin = meta.get("pay")
+        if coin not in COIN_IDS:
+            return await i.response.send_message(
+                "This isn't a purchase ticket with a coin selected.", ephemeral=True)
+        await i.response.send_modal(SetOrderModal(coin))
+
+    @discord.ui.button(label="Check Payment", emoji="🔎",
+                       style=discord.ButtonStyle.success, custom_id="pay:check")
+    async def check(self, i: discord.Interaction, b: discord.ui.Button):
+        if not is_ticket_staff(i.user):
+            return await i.response.send_message("🔒 Staff only.", ephemeral=True)
+        meta = store.tickets.get(str(i.channel.id), {})
+        inv = meta.get("invoice")
+        if not inv:
+            return await i.response.send_message(
+                "No invoice yet — press **💲 Set Order** first.", ephemeral=True)
+        await i.response.defer()
+        res = await address_received(inv["coin"], inv["address"], inv["amount"], inv["at"])
+        coin = inv["coin"]
+        st = res["status"]
+        if st == "paid":
+            inv["paid"] = True
+            store.save()
+            tag = "✅ confirmed" if res["confirmed"] else "🕓 detected (awaiting confirmations)"
+            e = discord.Embed(title=f"{em('sb_check','✅')} Payment received — in full",
+                              colour=GOOD,
+                              description=f"Received **{res['received']:.8f} {coin}** "
+                                          f"(needed `{inv['amount']}`).\nStatus: {tag}")
+        elif st == "partial":
+            short = inv["amount"] - res["received"]
+            e = discord.Embed(title="⚠️ Underpaid",
+                              colour=WARN,
+                              description=(f"Received **{res['received']:.8f} {coin}** but the order is "
+                                           f"`{inv['amount']}` {coin} (${inv['usd']:.2f}).\n"
+                                           f"Short by **~{short:.8f} {coin}**.\n\n"
+                                           f"🔁 The customer must **wait for a staff member to send it "
+                                           f"back** (refund the underpayment)."))
+        elif st == "none":
+            e = discord.Embed(title="⏳ No payment yet",
+                              colour=BAD,
+                              description=f"No incoming **{coin}** of `{inv['amount']}` found yet. "
+                                          f"Ask the customer to send it, then check again.")
+        elif st == "manual":
+            e = discord.Embed(title="🔎 Verify USDT manually",
+                              colour=WARN,
+                              description=("Automatic USDT (BEP-20) checks need a free **BscScan API "
+                                           "key** set as `BSCSCAN_API_KEY`. Until then, verify the "
+                                           "transfer on bscscan.com yourself."))
+        else:
+            e = discord.Embed(title="⚠️ Couldn't check right now",
+                              colour=BAD,
+                              description="The blockchain lookup failed — try again in a moment.")
+        await i.followup.send(embed=e)
+
+
 ticket_group = app_commands.Group(name="ticket", description="Ticket system",
                                   default_permissions=discord.Permissions(manage_guild=True))
 
@@ -1333,6 +1627,27 @@ async def ticket_setrole(i: discord.Interaction, role: discord.Role):
     await i.response.send_message(f"✅ Ticket staff role set to {role.mention}.", ephemeral=True)
 
 
+# ===================================================================== PRICES
+@bot.tree.command(name="prices", description="🏷️ Boost price list")
+async def prices_cmd(i: discord.Interaction):
+    arr = em("sb_arrow", "›")
+    rows = "\n".join(f"{arr} **{qty} boosts** — **${price:.2f}**" for qty, price in PRICE_LIST.items())
+    paytxt = "   ".join(f"{em('sb_'+n.lower())} **{n}**" + (f" `+{f}`" if f else " `free`")
+                        for n, _e, f in PAY_METHODS)
+    e = discord.Embed(
+        title=f"{em('sb_ticket','🏷️')}  Simple Boosts — Price List",
+        colour=ACCENT,
+        description=f"1-month Discord server boosts · instant delivery 💜\n\n{rows}")
+    e.add_field(name="💳 Payment methods", value=f"{paytxt}\n*LTC free · USDT & BTC +$1*", inline=False)
+    e.set_footer(text="Simple Boosts · Open a ticket to order")
+    logo = BASE / "emojis" / "sb_boost.png"
+    if logo.exists():
+        e.set_thumbnail(url="attachment://logo.png")
+        await i.response.send_message(embed=e, file=discord.File(logo, filename="logo.png"))
+    else:
+        await i.response.send_message(embed=e)
+
+
 # ===================================================================== HELP
 @bot.tree.command(name="help", description="📖 List everything the bot can do")
 async def help_cmd(i: discord.Interaction):
@@ -1341,8 +1656,8 @@ async def help_cmd(i: discord.Interaction):
                 value="`/warn` `/mute` `/unmute` `/kick` `/ban` `/unban` `/purge` `/lock` `/unlock` `/slowmode` `/modlogs` `/clearlogs` `/nuke`", inline=False)
     e.add_field(name="⭐ Vouches", value="`/vouch order rating comment` `/vouches` `/delvouch`", inline=False)
     e.add_field(name="🎉 Giveaways", value="`/giveaway create` `/giveaway end` `/giveaway reroll`\n*requirements: role · invites · messages · account age*", inline=False)
-    e.add_field(name="🎫 Tickets", value="`/ticket panel` `/ticket setrole`", inline=False)
-    e.add_field(name="🛠️ Setup & build", value="`/setup channels` `/setup makechannel` `/buildserver` `/embed create`", inline=False)
+    e.add_field(name="🎫 Tickets & shop", value="`/ticket panel` `/ticket setrole` `/prices`\n*purchase tickets show your crypto address + verify payment on-chain*", inline=False)
+    e.add_field(name="🛠️ Setup & build", value="`/setup channels` `/setup addresses` `/setup makechannel` `/buildserver` `/embed create`", inline=False)
     await i.response.send_message(embed=e, ephemeral=True)
 
 
@@ -1466,6 +1781,7 @@ async def setup_hook():
     bot.add_view(GiveawayView())
     bot.add_view(TicketPanelView())
     bot.add_view(TicketCloseView())
+    bot.add_view(PaymentPanelView())
     bot.loop.create_task(giveaway_loop())
 
 
