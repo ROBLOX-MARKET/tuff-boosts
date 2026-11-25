@@ -1126,7 +1126,13 @@ def invoice_embed(inv):
                "If you send **less than the amount**, you'll have to **wait for a staff "
                "member to send it back** (refund). Please don't send extra."),
         inline=False)
-    e.set_footer(text="Staff: press 🔎 Check Payment once it's been sent")
+    e.add_field(
+        name="📋 How to pay",
+        value=("› Tap **📋 Copy Address** to copy the address\n"
+               "› Send the exact amount above\n"
+               "› Tap **🔔 Track My Payment** to check it landed"),
+        inline=False)
+    e.set_footer(text="Staff: 🔎 Check Payment to confirm in full")
     return e
 
 
@@ -1497,8 +1503,12 @@ async def open_ticket(i, kind, pay=None, invoice=None):
                             "**exact amount** to send.\n\n"
                             "⚠️ Send the **exact** amount. If you send **less than the amount**, you'll "
                             "have to **wait for a staff member to send it back** (refund)."))
-            pm.set_footer(text="Staff: press 💲 Set Order to create the invoice")
-            await ch.send(embed=pm, view=PaymentPanelView())
+            pm.set_footer(text="Staff: press 💲 Set Order to set the total · 📋 Copy Address to copy")
+            panel = await ch.send(embed=pm, view=PaymentPanelView())
+            m = store.tickets.get(str(ch.id), {})
+            m["panel_msg"] = panel.id          # so Set Order updates this one in place
+            store.tickets[str(ch.id)] = m
+            store.save()
         else:
             await ch.send("⚠️ Payment addresses aren't set up yet — owner, run `/setup addresses`.")
     await i.followup.send(f"{em('sb_check','✅')} Ticket created: {ch.mention}", ephemeral=True)
@@ -1621,9 +1631,23 @@ class SetOrderModal(discord.ui.Modal, title="Set order total"):
                            "amount": amount, "rate": rate, "at": now().isoformat(), "paid": False}
         store.tickets[str(i.channel.id)] = meta
         store.save()
+        # Update the ONE payment panel in place (no new embeds flooding the ticket)
+        edited = False
+        pid = meta.get("panel_msg")
+        if pid:
+            try:
+                await i.channel.get_partial_message(int(pid)).edit(
+                    embed=invoice_embed(meta["invoice"]), view=PaymentPanelView())
+                edited = True
+            except Exception:
+                edited = False
+        if not edited:
+            sent = await i.channel.send(embed=invoice_embed(meta["invoice"]), view=PaymentPanelView())
+            meta["panel_msg"] = sent.id
+            store.tickets[str(i.channel.id)] = meta
+            store.save()
         await i.followup.send(f"{em('sb_check','✅')} Invoice set — ${total:.2f} in {self.coin}.",
                               ephemeral=True)
-        await i.channel.send(embed=invoice_embed(meta["invoice"]), view=PaymentPanelView())
 
 
 class PaymentPanelView(discord.ui.View):
@@ -1631,7 +1655,7 @@ class PaymentPanelView(discord.ui.View):
         super().__init__(timeout=None)
 
     @discord.ui.button(label="Price List", emoji="🏷️",
-                       style=discord.ButtonStyle.secondary, custom_id="pay:prices")
+                       style=discord.ButtonStyle.secondary, custom_id="pay:prices", row=0)
     async def pricelist(self, i: discord.Interaction, b: discord.ui.Button):
         f = prices_file()
         if f:
@@ -1639,8 +1663,50 @@ class PaymentPanelView(discord.ui.View):
         else:
             await i.response.send_message(embed=prices_embed(), ephemeral=True)
 
+    @discord.ui.button(label="Copy Address", emoji="📋",
+                       style=discord.ButtonStyle.secondary, custom_id="pay:copy", row=0)
+    async def copyaddr(self, i: discord.Interaction, b: discord.ui.Button):
+        meta = store.tickets.get(str(i.channel.id), {})
+        inv = meta.get("invoice")
+        addr = (inv or {}).get("address") or shop_address(meta.get("pay"))
+        if not addr:
+            return await i.response.send_message("No address set yet.", ephemeral=True)
+        if inv:
+            await i.response.send_message(
+                f"Send **{inv['amount']} {inv['coin']}** (≈ ${inv['usd']:.2f}) to:\n`{addr}`",
+                ephemeral=True)
+        else:
+            await i.response.send_message(f"`{addr}`", ephemeral=True)
+
+    @discord.ui.button(label="Track My Payment", emoji="🔔",
+                       style=discord.ButtonStyle.primary, custom_id="pay:track", row=0)
+    async def track(self, i: discord.Interaction, b: discord.ui.Button):
+        meta = store.tickets.get(str(i.channel.id), {})
+        inv = meta.get("invoice")
+        if not inv:
+            return await i.response.send_message(
+                "⏳ Staff haven't set your total yet — hang tight!", ephemeral=True)
+        await i.response.defer(ephemeral=True)
+        res = await address_received(inv["coin"], inv["address"], inv["amount"], inv["at"])
+        coin, st = inv["coin"], res["status"]
+        if st == "paid":
+            msg = (f"✅ **Payment detected!** We've seen your **{coin}** on the blockchain. "
+                   f"Staff will confirm and complete your order shortly. 💜")
+        elif st == "partial":
+            msg = (f"⚠️ We detected **{res['received']:.8f} {coin}**, but your order is "
+                   f"**{inv['amount']} {coin}**. That's **underpaid** — please **wait for a staff "
+                   f"member to send it back** (refund). Don't send more.")
+        elif st == "none":
+            msg = (f"⏳ **Not detected yet.** Make sure you sent **exactly `{inv['amount']}` {coin}** "
+                   f"to the address, then tap this again in a minute.")
+        elif st == "manual":
+            msg = "⏳ USDT payments are confirmed manually by staff — they'll sort it shortly."
+        else:
+            msg = "⚠️ Couldn't reach the blockchain right now — try again in a moment."
+        await i.followup.send(msg, ephemeral=True)
+
     @discord.ui.button(label="Set Order", emoji="💲",
-                       style=discord.ButtonStyle.primary, custom_id="pay:set")
+                       style=discord.ButtonStyle.success, custom_id="pay:set", row=1)
     async def setorder(self, i: discord.Interaction, b: discord.ui.Button):
         if not is_ticket_staff(i.user):
             return await i.response.send_message("🔒 Staff only.", ephemeral=True)
@@ -1651,8 +1717,8 @@ class PaymentPanelView(discord.ui.View):
                 "This isn't a purchase ticket with a coin selected.", ephemeral=True)
         await i.response.send_modal(SetOrderModal(coin))
 
-    @discord.ui.button(label="Check Payment", emoji="🔎",
-                       style=discord.ButtonStyle.success, custom_id="pay:check")
+    @discord.ui.button(label="Check Payment (staff)", emoji="🔎",
+                       style=discord.ButtonStyle.secondary, custom_id="pay:check", row=1)
     async def check(self, i: discord.Interaction, b: discord.ui.Button):
         if not is_ticket_staff(i.user):
             return await i.response.send_message("🔒 Staff only.", ephemeral=True)
