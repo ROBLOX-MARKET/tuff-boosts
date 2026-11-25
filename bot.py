@@ -1576,6 +1576,10 @@ async def open_ticket(i, kind, pay=None, invoice=None):
                          "› Your server invite (if boosting a server)"))
         e.add_field(name="Payment", value=f"{pe} **{pay}**".strip(), inline=True)
         e.add_field(name="Fee", value=(f"+{fee}" if fee else "No fee"), inline=True)
+        e.add_field(name="​",
+                    value="💳 Ready to pay? Tap **Pay Now** below — totally optional, pay whenever you're ready.",
+                    inline=False)
+        view = BuyTicketView()
     else:
         e = discord.Embed(
             title="💬  Support",
@@ -1584,32 +1588,12 @@ async def open_ticket(i, kind, pay=None, invoice=None):
                         "can and a staff member will help you out.\n\n"
                         "📦 **Having an issue with an order?** Please include your **order ID** "
                         "so we can find it quickly."))
+        view = TicketCloseView()
     e.add_field(name="Opened by", value=i.user.mention, inline=True)
     e.set_footer(text="Simple Boosts • Staff can claim & close this ticket")
     await ch.send(content=f"{ping} {i.user.mention}".strip(),
-                  embed=e, view=TicketCloseView(),
+                  embed=e, view=view,
                   allowed_mentions=discord.AllowedMentions(roles=True, users=True))
-    if kind == "buy":
-        addr = shop_address(pay)
-        pe = em(f"sb_{pay.lower()}")
-        chain = f"  ·  {USDT_CHAIN_LABEL}" if pay == "USDT" else ""
-        if addr:
-            pm = discord.Embed(
-                title=f"{pe}  Payment — {pay}{chain}",
-                colour=ACCENT,
-                description=(f"Our **{pay}** address:\n```{addr}```\n"
-                            "A staff member will set your total with **💲 Set Order**, which shows the "
-                            "**exact amount** to send.\n\n"
-                            "⚠️ Send the **exact** amount. If you send **less than the amount**, you'll "
-                            "have to **wait for a staff member to send it back** (refund)."))
-            pm.set_footer(text="Staff: press 💲 Set Order to set the total · 📋 Copy Address to copy")
-            panel = await ch.send(embed=pm, view=PaymentPanelView())
-            m = store.tickets.get(str(ch.id), {})
-            m["panel_msg"] = panel.id          # so Set Order updates this one in place
-            store.tickets[str(ch.id)] = m
-            store.save()
-        else:
-            await ch.send("⚠️ Payment addresses aren't set up yet — owner, run `/setup addresses`.")
     await i.followup.send(f"{em('sb_check','✅')} Ticket created: {ch.mention}", ephemeral=True)
 
 
@@ -1653,35 +1637,116 @@ class TicketPanelView(discord.ui.View):
             await open_ticket(i, "support")
 
 
+async def _ticket_claim(i):
+    if not is_ticket_staff(i.user):
+        return await i.response.send_message("🔒 Only staff can claim tickets.", ephemeral=True)
+    meta = store.tickets.get(str(i.channel.id), {})
+    if meta.get("claimed_by"):
+        return await i.response.send_message(
+            f"Already claimed by <@{meta['claimed_by']}>.", ephemeral=True)
+    meta["claimed_by"] = i.user.id
+    store.tickets[str(i.channel.id)] = meta
+    store.save()
+    await i.response.send_message(
+        embed=discord.Embed(description=f"🙋 Ticket claimed by {i.user.mention} — they'll help you from here.",
+                            colour=ACCENT))
+
+
+async def _ticket_close(i):
+    if not is_ticket_staff(i.user):
+        return await i.response.send_message(
+            "🔒 Only staff (or admins) can close this ticket.", ephemeral=True)
+    await i.response.send_message("📦 Saving transcript & closing in a moment…", ephemeral=True)
+    await close_ticket(i.channel, i.user)
+
+
+async def _ticket_paynow(i):
+    meta = store.tickets.get(str(i.channel.id), {})
+    if meta.get("kind") != "buy":
+        return await i.response.send_message("This isn't a purchase ticket.", ephemeral=True)
+    if meta.get("panel_msg"):
+        return await i.response.send_message(
+            "💳 Your payment panel is already open in this ticket.", ephemeral=True)
+    pay = meta.get("pay")
+    addr = shop_address(pay)
+    if not addr:
+        return await i.response.send_message(
+            "⚠️ Payment addresses aren't set up yet — ask the owner to run `/setup addresses`.", ephemeral=True)
+    await i.response.defer(ephemeral=True)
+    pe = em(f"sb_{pay.lower()}")
+    chain = f"  ·  {USDT_CHAIN_LABEL}" if pay == "USDT" else ""
+    pm = discord.Embed(
+        title=f"{pe}  Payment — {pay}{chain}",
+        colour=ACCENT,
+        description=(f"Our **{pay}** address:\n```{addr}```\n"
+                    "A staff member will set your total with **💲 Set Order**, which shows the "
+                    "**exact amount** to send.\n\n"
+                    "⚠️ Send the **exact** amount. If you send **less than the amount**, you'll "
+                    "have to **wait for a staff member to send it back** (refund)."))
+    pm.set_footer(text="Staff: press 💲 Set Order to set the total · 📋 Copy Address to copy")
+    panel = await i.channel.send(embed=pm, view=PaymentPanelView())
+    meta["panel_msg"] = panel.id
+    store.tickets[str(i.channel.id)] = meta
+    store.save()
+    # Pay Now has done its job — remove it, keep Claim + Close
+    try:
+        await i.message.edit(view=BuyTicketClaimedView())
+    except Exception:
+        pass
+    await i.followup.send("💳 Payment panel opened below. 👇", ephemeral=True)
+
+
 class TicketCloseView(discord.ui.View):
+    """Support tickets: Claim + Close."""
     def __init__(self):
         super().__init__(timeout=None)
 
     @discord.ui.button(label="Claim", emoji="🙋",
                        style=discord.ButtonStyle.primary, custom_id="tkt:claim")
-    async def claim(self, i: discord.Interaction, b: discord.ui.Button):
-        if not is_ticket_staff(i.user):
-            return await i.response.send_message(
-                "🔒 Only staff can claim tickets.", ephemeral=True)
-        meta = store.tickets.get(str(i.channel.id), {})
-        if meta.get("claimed_by"):
-            return await i.response.send_message(
-                f"Already claimed by <@{meta['claimed_by']}>.", ephemeral=True)
-        meta["claimed_by"] = i.user.id
-        store.tickets[str(i.channel.id)] = meta
-        store.save()
-        e = discord.Embed(description=f"🙋 Ticket claimed by {i.user.mention} — they'll help you from here.",
-                          colour=ACCENT)
-        await i.response.send_message(embed=e)
+    async def claim(self, i, b):
+        await _ticket_claim(i)
 
     @discord.ui.button(label="Close Ticket", emoji="🔒",
                        style=discord.ButtonStyle.danger, custom_id="tkt:close")
-    async def close(self, i: discord.Interaction, b: discord.ui.Button):
-        if not is_ticket_staff(i.user):
-            return await i.response.send_message(
-                "🔒 Only staff (or admins) can close this ticket.", ephemeral=True)
-        await i.response.send_message("📦 Saving transcript & closing in a moment…", ephemeral=True)
-        await close_ticket(i.channel, i.user)
+    async def close(self, i, b):
+        await _ticket_close(i)
+
+
+class BuyTicketView(discord.ui.View):
+    """Purchase tickets: optional Pay Now + Claim + Close."""
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Pay Now", emoji="💳",
+                       style=discord.ButtonStyle.success, custom_id="tkt:paynow")
+    async def paynow(self, i, b):
+        await _ticket_paynow(i)
+
+    @discord.ui.button(label="Claim", emoji="🙋",
+                       style=discord.ButtonStyle.primary, custom_id="tkt:claim2")
+    async def claim(self, i, b):
+        await _ticket_claim(i)
+
+    @discord.ui.button(label="Close Ticket", emoji="🔒",
+                       style=discord.ButtonStyle.danger, custom_id="tkt:close2")
+    async def close(self, i, b):
+        await _ticket_close(i)
+
+
+class BuyTicketClaimedView(discord.ui.View):
+    """Purchase ticket after Pay Now was used — Pay Now removed, Claim + Close stay."""
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Claim", emoji="🙋",
+                       style=discord.ButtonStyle.primary, custom_id="tkt:claim2")
+    async def claim(self, i, b):
+        await _ticket_claim(i)
+
+    @discord.ui.button(label="Close Ticket", emoji="🔒",
+                       style=discord.ButtonStyle.danger, custom_id="tkt:close2")
+    async def close(self, i, b):
+        await _ticket_close(i)
 
 
 class SetOrderModal(discord.ui.Modal, title="Set order total"):
@@ -2123,6 +2188,7 @@ async def setup_hook():
     bot.add_view(GiveawayView())
     bot.add_view(TicketPanelView())
     bot.add_view(TicketCloseView())
+    bot.add_view(BuyTicketView())
     bot.add_view(PaymentPanelView())
     bot.add_view(InvoicePanelView())
     bot.loop.create_task(giveaway_loop())
