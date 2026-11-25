@@ -962,14 +962,17 @@ async def open_ticket(i, kind, pay=None, invoice=None):
             cat = await guild.create_category(TICKET_CAT)
         except Exception:
             cat = None
-    safe = re.sub(r"[^a-z0-9]+", "-", i.user.name.lower()).strip("-") or "user"
-    prefix = {"buy": "order", "support": "support"}.get(kind, "ticket")
+    label = {"buy": "boosts", "support": "support"}.get(kind, "ticket")
+    counters = store.config.setdefault("ticket_counters", {})
+    num = counters.get(kind, 0) + 1
+    chname = f"{label}-{num:04d}"   # e.g. boosts-0001 / support-0001
     try:
         ch = await guild.create_text_channel(
-            f"{prefix}-{safe}", category=cat, overwrites=_ticket_overwrites(guild, i.user))
+            chname, category=cat, overwrites=_ticket_overwrites(guild, i.user))
     except discord.Forbidden:
         return await i.followup.send(
             "❌ I need the **Manage Channels** permission (give me Administrator).", ephemeral=True)
+    counters[kind] = num   # only bump the counter once the channel actually exists
     store.tickets[str(ch.id)] = {"opener": i.user.id, "kind": kind, "pay": pay,
                                  "invoice": invoice, "at": now().isoformat(), "closed": False}
     store.save()
