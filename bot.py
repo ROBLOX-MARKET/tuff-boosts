@@ -1820,18 +1820,27 @@ class SetOrderModal(discord.ui.Modal, title="Set order total"):
                "paid": False, "announced": False, "qr": bool(qr)}
         meta = store.tickets.get(str(i.channel.id), {})
         meta["invoice"] = inv
-        # replace the single payment panel (delete old, post fresh QR invoice) — no flooding
+        # Transform the EXISTING panel in place → invoice (InvoicePanelView has NO Set Order),
+        # so the Set Order button is guaranteed to be gone. Fall back to a fresh post only if
+        # the old message can't be edited.
+        done = False
         old = meta.get("panel_msg")
         if old:
             try:
-                await i.channel.get_partial_message(int(old)).delete()
+                msg = await i.channel.fetch_message(int(old))
+                edit_kwargs = {"embed": invoice_embed(inv), "view": InvoicePanelView()}
+                if qr:
+                    edit_kwargs["attachments"] = [discord.File(qr, filename="qr.png")]
+                await msg.edit(**edit_kwargs)
+                done = True
             except Exception:
-                pass
-        send_kwargs = {"embed": invoice_embed(inv), "view": InvoicePanelView()}
-        if qr:
-            send_kwargs["file"] = discord.File(qr, filename="qr.png")
-        sent = await i.channel.send(**send_kwargs)
-        meta["panel_msg"] = sent.id
+                done = False
+        if not done:
+            send_kwargs = {"embed": invoice_embed(inv), "view": InvoicePanelView()}
+            if qr:
+                send_kwargs["file"] = discord.File(qr, filename="qr.png")
+            sent = await i.channel.send(**send_kwargs)
+            meta["panel_msg"] = sent.id
         store.tickets[str(i.channel.id)] = meta
         store.save()
         await i.followup.send(f"{em('sb_check','✅')} Invoice set — ${total:.2f} in {self.coin}. "
