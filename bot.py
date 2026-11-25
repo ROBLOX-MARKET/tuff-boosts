@@ -9,6 +9,8 @@ Environment variables (set on your host, never in code/chat):
 """
 
 import asyncio
+import html as _html
+import io
 import json
 import os
 import random
@@ -35,6 +37,20 @@ GOOD = 0x37D98A
 BAD = 0xFF5D7A
 WARN = 0xFFCE4D
 DATA_FILE = BASE / "data.json"
+BANNER_FILE = BASE / "banner.gif"
+
+# Ticket staff role — the ONLY role that gets pinged on a ticket and can close it.
+# Override by setting TICKET_ROLE in env, else this default.
+TICKET_ROLE_DEFAULT = 1575014415458111551
+
+# Payment methods shown when someone opens a "Purchase Boosts" ticket.
+PAY_METHODS = [
+    ("PayPal",            "💳"),
+    ("Crypto (LTC/BTC/ETH)", "🪙"),
+    ("CashApp",           "💵"),
+    ("Apple / Google Pay", "📱"),
+    ("Card / Other",      "🏦"),
+]
 
 
 # ----------------------------------------------------------------- data store
@@ -52,12 +68,17 @@ class Store:
         self.cases = d.get("cases", {})          # user_id -> [ {type, reason, mod, at} ]
         self.vouches = d.get("vouches", {})      # seller_id -> [ {stars, text, by, at} ]
         self.giveaways = d.get("giveaways", {})  # message_id -> {...}
+        self.msgs = d.get("msgs", {})            # guild_id -> user_id -> {"YYYY-MM-DD": count}
+        self.invites = d.get("invites", {})      # guild_id -> inviter_id -> count
+        self.tickets = d.get("tickets", {})      # channel_id -> {opener, kind, pay, at}
 
     def save(self):
         tmp = DATA_FILE.with_suffix(".tmp")
         tmp.write_text(json.dumps({
             "config": self.config, "cases": self.cases,
-            "vouches": self.vouches, "giveaways": self.giveaways}, indent=2), "utf-8")
+            "vouches": self.vouches, "giveaways": self.giveaways,
+            "msgs": self.msgs, "invites": self.invites,
+            "tickets": self.tickets}, indent=2), "utf-8")
         tmp.replace(DATA_FILE)
 
 
@@ -81,6 +102,88 @@ def parse_duration(text):
         return None
     n, unit = int(m.group(1)), m.group(2)
     return n * {"s": 1, "m": 60, "h": 3600, "d": 86400}[unit]
+
+
+# ---- message counting (per-user daily buckets) -------------------------------
+def bump_message(guild_id, user_id):
+    day = now().strftime("%Y-%m-%d")
+    g = store.msgs.setdefault(str(guild_id), {})
+    u = g.setdefault(str(user_id), {})
+    u[day] = u.get(day, 0) + 1
+    # keep it light: drop buckets older than ~400 days
+    if len(u) > 420:
+        for k in sorted(u)[:-400]:
+            u.pop(k, None)
+
+
+def msg_count(guild_id, user_id, period):
+    """period: 'day' | 'week' | 'month' | 'all'"""
+    u = store.msgs.get(str(guild_id), {}).get(str(user_id), {})
+    if not u:
+        return 0
+    if period == "all":
+        return sum(u.values())
+    days = {"day": 1, "week": 7, "month": 30}.get(period, 1)
+    cutoff = (now() - timedelta(days=days - 1)).date()
+    total = 0
+    for k, v in u.items():
+        try:
+            if datetime.strptime(k, "%Y-%m-%d").date() >= cutoff:
+                total += v
+        except ValueError:
+            pass
+    return total
+
+
+def invite_count(guild_id, user_id):
+    return store.invites.get(str(guild_id), {}).get(str(user_id), 0)
+
+
+PERIOD_LABEL = {"day": "today", "week": "this week", "month": "this month", "all": "all-time"}
+
+
+def requirement_lines(gw):
+    """Human-readable list of a giveaway's entry requirements (for the embed)."""
+    out = []
+    if gw.get("req_role"):
+        out.append(f"• Must have <@&{gw['req_role']}>")
+    if gw.get("req_invites"):
+        out.append(f"• **{gw['req_invites']}+** invites")
+    if gw.get("req_msgs"):
+        out.append(f"• **{gw['req_msgs']}+** messages {PERIOD_LABEL.get(gw.get('req_period','all'))}")
+    if gw.get("req_age_days"):
+        out.append(f"• Account **{gw['req_age_days']}+** days old")
+    return out
+
+
+def check_requirements(gw, member):
+    """Return None if member qualifies, else a short reason string."""
+    gid = member.guild.id
+    if gw.get("req_role") and not any(r.id == gw["req_role"] for r in member.roles):
+        return f"You need the <@&{gw['req_role']}> role to enter."
+    if gw.get("req_invites"):
+        have = invite_count(gid, member.id)
+        if have < gw["req_invites"]:
+            return f"You need **{gw['req_invites']}** invites to enter (you have **{have}**)."
+    if gw.get("req_msgs"):
+        period = gw.get("req_period", "all")
+        have = msg_count(gid, member.id, period)
+        if have < gw["req_msgs"]:
+            return (f"You need **{gw['req_msgs']}** messages {PERIOD_LABEL.get(period)} "
+                    f"to enter (you have **{have}**).")
+    if gw.get("req_age_days"):
+        age = (now() - member.created_at).days
+        if age < gw["req_age_days"]:
+            return f"Your account must be **{gw['req_age_days']}+** days old (it's **{age}**)."
+    return None
+
+
+def ticket_role_id(guild):
+    env = os.getenv("TICKET_ROLE", "").strip()
+    if env.isdigit():
+        return int(env)
+    cfg = store.config.get("ticket_role")
+    return int(cfg) if cfg else TICKET_ROLE_DEFAULT
 
 
 # ----------------------------------------------------------------- bot
@@ -380,7 +483,7 @@ class GiveawayView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="🎉 Enter", style=discord.ButtonStyle.primary, custom_id="gw:enter")
+    @discord.ui.button(label="Enter", emoji="🎉", style=discord.ButtonStyle.success, custom_id="gw:enter")
     async def enter(self, i: discord.Interaction, b: discord.ui.Button):
         gw = store.giveaways.get(str(i.message.id))
         if not gw or gw.get("ended"):
@@ -389,20 +492,48 @@ class GiveawayView(discord.ui.View):
         if i.user.id in ent:
             ent.remove(i.user.id)
             store.save()
-            return await i.response.send_message("You left the giveaway.", ephemeral=True)
+            try:
+                await i.message.edit(embed=gw_embed(gw))
+            except Exception:
+                pass
+            return await i.response.send_message("👋 You left the giveaway.", ephemeral=True)
+        # requirement gate
+        reason = check_requirements(gw, i.user)
+        if reason:
+            return await i.response.send_message(f"🔒 {reason}", ephemeral=True)
         ent.append(i.user.id)
         store.save()
+        try:
+            await i.message.edit(embed=gw_embed(gw))
+        except Exception:
+            pass
         await i.response.send_message("✅ You're entered! Good luck 🍀", ephemeral=True)
+
+    @discord.ui.button(label="Entries", emoji="👥", style=discord.ButtonStyle.secondary, custom_id="gw:count")
+    async def count(self, i: discord.Interaction, b: discord.ui.Button):
+        gw = store.giveaways.get(str(i.message.id))
+        n = len(gw.get("entrants", [])) if gw else 0
+        you = "✅ You're in." if gw and i.user.id in gw.get("entrants", []) else "❌ You're not entered."
+        await i.response.send_message(f"👥 **{n}** entered so far.\n{you}", ephemeral=True)
 
 
 def gw_embed(gw):
     end = datetime.fromisoformat(gw["end"])
-    e = discord.Embed(title=f"🎉 {gw['prize']}", colour=ACCENT,
-                      description=(f"Click **Enter** below!\n\n"
-                                  f"Ends: <t:{int(end.timestamp())}:R>\n"
-                                  f"Winners: **{gw['winners']}**\n"
-                                  f"Entries: **{len(gw.get('entrants', []))}**"))
-    e.set_footer(text=f"Hosted by {gw['host']}")
+    ended = gw.get("ended")
+    e = discord.Embed(
+        title=f"🎉  {gw['prize']}",
+        colour=0x3BA55D if ended else ACCENT,
+        description=("🎊 **This giveaway has ended!**" if ended
+                     else "React with the **🎉 Enter** button below for a chance to win!"),
+    )
+    e.add_field(name="⏳ Ends", value=f"<t:{int(end.timestamp())}:R>\n<t:{int(end.timestamp())}:f>", inline=True)
+    e.add_field(name="🏆 Winners", value=f"**{gw['winners']}**", inline=True)
+    e.add_field(name="👥 Entries", value=f"**{len(gw.get('entrants', []))}**", inline=True)
+    reqs = requirement_lines(gw)
+    if reqs:
+        e.add_field(name="📋 Requirements to enter", value="\n".join(reqs), inline=False)
+    e.set_footer(text=f"Hosted by {gw['host']} • Good luck!")
+    e.timestamp = end
     return e
 
 
@@ -410,9 +541,29 @@ giveaway_group = app_commands.Group(name="giveaway", description="Giveaways",
                                     default_permissions=discord.Permissions(manage_guild=True))
 
 
-@giveaway_group.command(name="create", description="🎉 Start a giveaway")
-@app_commands.describe(duration="e.g. 1h, 2d, 30m", winners="How many winners", prize="What they win")
-async def gw_create(i: discord.Interaction, duration: str, winners: int, prize: str):
+@giveaway_group.command(name="create", description="🎉 Start a giveaway (with optional entry requirements)")
+@app_commands.describe(
+    duration="e.g. 1h, 2d, 30m",
+    winners="How many winners",
+    prize="What they win",
+    required_role="Entrants must have this role",
+    required_invites="Minimum invites needed to enter",
+    required_messages="Minimum messages needed to enter",
+    message_period="Over what period the messages must be sent",
+    min_account_age_days="Minimum account age in days (anti-alt)",
+)
+@app_commands.choices(message_period=[
+    app_commands.Choice(name="Today", value="day"),
+    app_commands.Choice(name="This week", value="week"),
+    app_commands.Choice(name="This month", value="month"),
+    app_commands.Choice(name="All time", value="all"),
+])
+async def gw_create(i: discord.Interaction, duration: str, winners: int, prize: str,
+                    required_role: discord.Role = None,
+                    required_invites: int = 0,
+                    required_messages: int = 0,
+                    message_period: app_commands.Choice[str] = None,
+                    min_account_age_days: int = 0):
     secs = parse_duration(duration)
     if not secs:
         return await i.response.send_message("Duration like `1h`, `2d`, `30m`.", ephemeral=True)
@@ -420,11 +571,30 @@ async def gw_create(i: discord.Interaction, duration: str, winners: int, prize: 
     end = now() + timedelta(seconds=secs)
     gw = {"prize": prize, "winners": winners, "end": end.isoformat(),
           "host": str(i.user), "host_id": i.user.id, "channel": i.channel.id,
-          "entrants": [], "ended": False}
+          "entrants": [], "ended": False,
+          "req_role": required_role.id if required_role else None,
+          "req_invites": max(0, required_invites),
+          "req_msgs": max(0, required_messages),
+          "req_period": (message_period.value if message_period else "all"),
+          "req_age_days": max(0, min_account_age_days)}
     await i.response.send_message("🎉 Giveaway started!", ephemeral=True)
     msg = await i.channel.send(embed=gw_embed(gw), view=GiveawayView())
     store.giveaways[str(msg.id)] = gw
     store.save()
+
+
+def _pick_winners(gw, guild):
+    """Pick winners from entrants who still qualify (role may have changed)."""
+    ent = list(gw.get("entrants", []))
+    eligible = []
+    for uid in ent:
+        m = guild.get_member(uid)
+        if m is None:               # left the server
+            continue
+        if check_requirements(gw, m) is None:
+            eligible.append(uid)
+    pool = eligible or ent          # fall back to raw entrants if we can't resolve members
+    return random.sample(pool, min(gw["winners"], len(pool))) if pool else []
 
 
 async def end_giveaway(msg_id, gw, guild):
@@ -438,18 +608,31 @@ async def end_giveaway(msg_id, gw, guild):
         msg = await ch.fetch_message(int(msg_id))
     except Exception:
         msg = None
+    link = msg.jump_url if msg else ""
     if not ent:
+        await ch.send(f"🎉 Giveaway for **{gw['prize']}** ended — no entries 😔")
         if msg:
-            await ch.send(f"🎉 Giveaway for **{gw['prize']}** ended — no entries 😔")
+            try:
+                await msg.edit(embed=gw_embed(gw), view=None)
+            except Exception:
+                pass
         return
-    winners = random.sample(ent, min(gw["winners"], len(ent)))
-    mentions = ", ".join(f"<@{w}>" for w in winners)
-    await ch.send(f"🎉 **GIVEAWAY ENDED** — **{gw['prize']}**\nWinner(s): {mentions}\nCongrats! 🥳")
+    winners = _pick_winners(gw, guild)
+    if not winners:
+        await ch.send(f"🎉 **{gw['prize']}** ended — no eligible entrants met the requirements 😔")
+    else:
+        mentions = ", ".join(f"<@{w}>" for w in winners)
+        gw["last_winners"] = winners
+        store.save()
+        e = discord.Embed(title="🎉 GIVEAWAY ENDED", colour=0x3BA55D,
+                          description=f"**Prize:** {gw['prize']}\n**Winner(s):** {mentions}\n\nCongratulations! 🥳")
+        if link:
+            e.add_field(name="Giveaway", value=f"[Jump to message]({link})")
+        e.set_footer(text=f"{len(ent)} total entries")
+        await ch.send(content=mentions, embed=e)
     if msg:
         try:
-            e = msg.embeds[0]
-            e.description = f"🎉 Ended!\nWinner(s): {mentions}\nEntries: **{len(ent)}**"
-            await msg.edit(embed=e, view=None)
+            await msg.edit(embed=gw_embed(gw), view=None)
         except Exception:
             pass
 
@@ -472,8 +655,10 @@ async def gw_reroll(i: discord.Interaction, message_id: str):
     ent = gw.get("entrants", [])
     if not ent:
         return await i.response.send_message("No entries to reroll.", ephemeral=True)
-    w = random.choice(ent)
-    await i.response.send_message(f"🔄 New winner of **{gw['prize']}**: <@{w}> 🥳")
+    w = _pick_winners({**gw, "winners": 1}, i.guild)
+    if not w:
+        return await i.response.send_message("No eligible entrant to reroll.", ephemeral=True)
+    await i.response.send_message(f"🔄 New winner of **{gw['prize']}**: <@{w[0]}> 🥳")
 
 
 async def giveaway_loop():
@@ -567,6 +752,288 @@ async def buildserver(i: discord.Interaction):
         "(skips existing). Build it?", view=BuildConfirm(i.user.id), ephemeral=True)
 
 
+# ==================================================================== TICKETS
+TICKET_CAT = "🎫 Tickets"
+TRANSCRIPT_NAME = "📑┃transcripts"
+
+
+def _ticket_overwrites(guild, opener):
+    role = guild.get_role(ticket_role_id(guild))
+    ow = {
+        guild.default_role: discord.PermissionOverwrite(view_channel=False),
+        guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True,
+                                              manage_channels=True, read_message_history=True),
+        opener: discord.PermissionOverwrite(view_channel=True, send_messages=True,
+                                            attach_files=True, embed_links=True,
+                                            read_message_history=True),
+    }
+    if role:
+        ow[role] = discord.PermissionOverwrite(view_channel=True, send_messages=True,
+                                               read_message_history=True)
+    return ow
+
+
+async def _transcript_channel(guild):
+    ch = discord.utils.find(lambda c: c.name.endswith("transcripts"), guild.text_channels)
+    if ch:
+        return ch
+    role = guild.get_role(ticket_role_id(guild))
+    ow = {guild.default_role: discord.PermissionOverwrite(view_channel=False),
+          guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True)}
+    if role:
+        ow[role] = discord.PermissionOverwrite(view_channel=True, send_messages=False)
+    cat = discord.utils.get(guild.categories, name=TICKET_CAT)
+    try:
+        return await guild.create_text_channel(TRANSCRIPT_NAME, overwrites=ow, category=cat)
+    except Exception:
+        return None
+
+
+def _render_transcript(channel, messages, closer):
+    opened = ""
+    meta = store.tickets.get(str(channel.id), {})
+    if meta.get("at"):
+        opened = meta["at"][:16].replace("T", " ")
+    rows = []
+    for m in messages:
+        av = m.author.display_avatar.url
+        name = _html.escape(m.author.display_name)
+        uname = _html.escape(str(m.author))
+        ts = m.created_at.strftime("%d %b %Y · %H:%M")
+        content = _html.escape(m.content or "")
+        # resolve user mentions to @name
+        for u in m.mentions:
+            content = content.replace(f"&lt;@{u.id}&gt;", f"@{_html.escape(u.display_name)}")
+            content = content.replace(f"&lt;@!{u.id}&gt;", f"@{_html.escape(u.display_name)}")
+        content = content.replace("\n", "<br>")
+        atts = ""
+        for a in m.attachments:
+            if a.content_type and a.content_type.startswith("image"):
+                atts += f'<a href="{_html.escape(a.url)}" target="_blank"><img class="att-img" src="{_html.escape(a.url)}"></a>'
+            else:
+                atts += f'<div class="att"><a href="{_html.escape(a.url)}" target="_blank">📎 {_html.escape(a.filename)}</a></div>'
+        embs = ""
+        for eb in m.embeds:
+            et = _html.escape(eb.title or "")
+            ed = _html.escape(eb.description or "").replace("\n", "<br>")
+            col = f"#{eb.colour.value:06x}" if eb.colour else "#8A4DFF"
+            embs += (f'<div class="embed" style="border-left:4px solid {col}">'
+                     f'{"<div class=et>"+et+"</div>" if et else ""}'
+                     f'{"<div class=ed>"+ed+"</div>" if ed else ""}</div>')
+        if not content and not atts and not embs:
+            content = '<span class="sys">(no text)</span>'
+        rows.append(f'''<div class="msg"><img class="av" src="{av}" loading="lazy">
+<div class="body"><div class="head"><span class="name">{name}</span>
+<span class="uname">{uname}</span><span class="ts">{ts}</span></div>
+<div class="content">{content}{atts}{embs}</div></div></div>''')
+    body = "\n".join(rows) or '<div class="sys">No messages.</div>'
+    title = _html.escape(channel.name)
+    return f'''<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Transcript · {title}</title>
+<style>
+:root{{color-scheme:dark}}
+*{{box-sizing:border-box}}
+body{{margin:0;background:#313338;color:#dbdee1;font:15px/1.45 "gg sans","Segoe UI",Roboto,Helvetica,Arial,sans-serif}}
+.top{{position:sticky;top:0;background:#2b2d31;border-bottom:1px solid #1f2023;padding:16px 22px;z-index:5}}
+.top h1{{margin:0;font-size:18px;color:#fff}}
+.top .sub{{color:#949ba4;font-size:13px;margin-top:4px}}
+.wrap{{max-width:900px;margin:0 auto;padding:18px 22px 60px}}
+.msg{{display:flex;gap:16px;padding:8px 0;margin-top:10px}}
+.av{{width:42px;height:42px;border-radius:50%;flex:0 0 42px;background:#1e1f22}}
+.body{{min-width:0;flex:1}}
+.head{{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap}}
+.name{{color:#fff;font-weight:600}}
+.uname{{color:#949ba4;font-size:12px}}
+.ts{{color:#949ba4;font-size:12px}}
+.content{{color:#dbdee1;word-wrap:break-word;white-space:normal}}
+.att{{margin-top:6px}}
+.att a{{color:#00a8fc;text-decoration:none}}
+.att-img{{max-width:360px;max-height:300px;border-radius:8px;margin-top:6px;display:block}}
+.embed{{margin-top:6px;background:#2b2d31;border-radius:4px;padding:8px 12px;max-width:460px}}
+.embed .et{{color:#fff;font-weight:600}}
+.embed .ed{{color:#dbdee1;font-size:14px;margin-top:2px}}
+.sys{{color:#949ba4;font-style:italic}}
+a{{color:#00a8fc}}
+</style></head><body>
+<div class="top"><h1>#{title}</h1>
+<div class="sub">{len(messages)} messages · opened {opened} · closed by {_html.escape(str(closer))} · {now().strftime("%d %b %Y · %H:%M")} UTC</div></div>
+<div class="wrap">{body}</div></body></html>'''
+
+
+async def close_ticket(channel, closer):
+    try:
+        messages = [m async for m in channel.history(limit=None, oldest_first=True)]
+    except Exception:
+        messages = []
+    html_doc = _render_transcript(channel, messages, closer)
+    meta = store.tickets.get(str(channel.id), {})
+    opener_id = meta.get("opener")
+    tch = await _transcript_channel(channel.guild)
+    if tch:
+        fobj = discord.File(io.BytesIO(html_doc.encode("utf-8")),
+                            filename=f"{channel.name}.html")
+        e = discord.Embed(title="📑 Ticket transcript", colour=ACCENT,
+                          description=f"**Ticket:** #{channel.name}\n"
+                                      f"**Opened by:** <@{opener_id}>\n"
+                                      f"**Closed by:** {closer.mention}\n"
+                                      f"**Messages:** {len(messages)}")
+        if meta.get("kind"):
+            e.add_field(name="Type", value=("🛒 Purchase" if meta["kind"] == "buy" else "💬 Support"))
+        if meta.get("pay"):
+            e.add_field(name="Payment", value=meta["pay"])
+        e.timestamp = now()
+        try:
+            await tch.send(embed=e, file=fobj)
+        except Exception as ex:
+            print("transcript send:", ex)
+    if str(channel.id) in store.tickets:
+        store.tickets[str(channel.id)]["closed"] = True
+        store.save()
+    await asyncio.sleep(2)
+    try:
+        await channel.delete(reason=f"Ticket closed by {closer}")
+    except Exception:
+        pass
+
+
+async def open_ticket(i, kind, pay=None):
+    guild = i.guild
+    if guild is None:
+        return await i.response.send_message("Use this in a server.", ephemeral=True)
+    # channel creation can take a moment — ack the interaction first
+    if not i.response.is_done():
+        await i.response.defer(ephemeral=True)
+    for cid, meta in list(store.tickets.items()):
+        if meta.get("opener") == i.user.id and not meta.get("closed"):
+            ch = guild.get_channel(int(cid))
+            if ch:
+                return await i.followup.send(
+                    f"⚠️ You already have an open ticket: {ch.mention}", ephemeral=True)
+    cat = discord.utils.get(guild.categories, name=TICKET_CAT)
+    if not cat:
+        try:
+            cat = await guild.create_category(TICKET_CAT)
+        except Exception:
+            cat = None
+    safe = re.sub(r"[^a-z0-9]+", "-", i.user.name.lower()).strip("-") or "user"
+    prefix = "buy" if kind == "buy" else "support"
+    try:
+        ch = await guild.create_text_channel(
+            f"{prefix}-{safe}", category=cat, overwrites=_ticket_overwrites(guild, i.user))
+    except discord.Forbidden:
+        return await i.followup.send(
+            "❌ I need the **Manage Channels** permission (give me Administrator).", ephemeral=True)
+    store.tickets[str(ch.id)] = {"opener": i.user.id, "kind": kind, "pay": pay,
+                                 "at": now().isoformat(), "closed": False}
+    store.save()
+    role = guild.get_role(ticket_role_id(guild))
+    ping = role.mention if role else ""
+    if kind == "buy":
+        e = discord.Embed(
+            title="🛒 Purchase Boosts",
+            colour=ACCENT,
+            description=("Thanks for your order! A staff member will be with you shortly.\n\n"
+                         "Please send:\n"
+                         "• **What** you want to buy\n"
+                         "• **How many / how long**\n"
+                         "• Your **server invite** (if boosting a server)"))
+        e.add_field(name="💳 Payment", value=pay or "—", inline=True)
+    else:
+        e = discord.Embed(
+            title="💬 Support",
+            colour=ACCENT,
+            description="Thanks for reaching out! Describe your issue in as much detail as you can "
+                        "and a staff member will help you out.")
+    e.add_field(name="👤 Opened by", value=i.user.mention, inline=True)
+    e.set_footer(text="Staff only can close this ticket.")
+    await ch.send(content=f"{ping} {i.user.mention}".strip(),
+                  embed=e, view=TicketCloseView(),
+                  allowed_mentions=discord.AllowedMentions(roles=True, users=True))
+    await i.followup.send(f"✅ Ticket created: {ch.mention}", ephemeral=True)
+
+
+class PaymentSelect(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=180)
+        opts = [discord.SelectOption(label=name, emoji=emoji) for name, emoji in PAY_METHODS]
+        self.sel = discord.ui.Select(placeholder="Choose your payment method…", options=opts)
+        self.sel.callback = self._picked
+        self.add_item(self.sel)
+
+    async def _picked(self, i: discord.Interaction):
+        await open_ticket(i, "buy", pay=self.sel.values[0])
+
+
+class TicketPanelView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Purchase Boosts", emoji="🛒",
+                       style=discord.ButtonStyle.success, custom_id="tkt:buy")
+    async def buy(self, i: discord.Interaction, b: discord.ui.Button):
+        await i.response.send_message(
+            "⚠️ **Only open a purchase ticket if the website is down.**\n"
+            "Otherwise please order through the website.\n\nPick your payment method below:",
+            view=PaymentSelect(), ephemeral=True)
+
+    @discord.ui.button(label="Support", emoji="💬",
+                       style=discord.ButtonStyle.primary, custom_id="tkt:support")
+    async def support(self, i: discord.Interaction, b: discord.ui.Button):
+        await open_ticket(i, "support")
+
+
+class TicketCloseView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Close Ticket", emoji="🔒",
+                       style=discord.ButtonStyle.danger, custom_id="tkt:close")
+    async def close(self, i: discord.Interaction, b: discord.ui.Button):
+        role_id = ticket_role_id(i.guild)
+        if not any(r.id == role_id for r in i.user.roles):
+            return await i.response.send_message(
+                "🔒 Only staff can close this ticket.", ephemeral=True)
+        await i.response.send_message("📦 Saving transcript & closing in a moment…", ephemeral=True)
+        await close_ticket(i.channel, i.user)
+
+
+ticket_group = app_commands.Group(name="ticket", description="Ticket system",
+                                  default_permissions=discord.Permissions(manage_guild=True))
+
+
+@ticket_group.command(name="panel", description="🎫 Post the ticket panel in this channel")
+@app_commands.describe(banner="Attach the Simple Boosts banner to the top (optional)")
+async def ticket_panel(i: discord.Interaction, banner: bool = False):
+    role = i.guild.get_role(ticket_role_id(i.guild))
+    role_txt = role.mention if role else f"`{ticket_role_id(i.guild)}`"
+    e = discord.Embed(
+        title="🎫  Open a Ticket",
+        colour=ACCENT,
+        description=("Need something? Open a ticket below and our team will help you out.\n\n"
+                     "🛒 **Purchase Boosts** — order boosts *(only if the website is down)*. "
+                     "You'll be asked which payment method you want to use.\n"
+                     "💬 **Support** — questions, issues, or anything else.\n\n"
+                     f"Our staff team ({role_txt}) will respond as soon as possible."))
+    e.set_footer(text="One ticket per person • Be patient, staff will be with you soon")
+    file = None
+    if banner and BANNER_FILE.exists():
+        file = discord.File(BANNER_FILE, filename="banner.gif")
+        e.set_image(url="attachment://banner.gif")
+    await i.response.send_message("✅ Panel posted.", ephemeral=True)
+    if file:
+        await i.channel.send(embed=e, view=TicketPanelView(), file=file)
+    else:
+        await i.channel.send(embed=e, view=TicketPanelView())
+
+
+@ticket_group.command(name="setrole", description="🎫 Set which role is pinged & can close tickets")
+async def ticket_setrole(i: discord.Interaction, role: discord.Role):
+    store.config["ticket_role"] = role.id
+    store.save()
+    await i.response.send_message(f"✅ Ticket staff role set to {role.mention}.", ephemeral=True)
+
+
 # ===================================================================== HELP
 @bot.tree.command(name="help", description="📖 List everything the bot can do")
 async def help_cmd(i: discord.Interaction):
@@ -574,7 +1041,8 @@ async def help_cmd(i: discord.Interaction):
     e.add_field(name="🔨 Moderation",
                 value="`/warn` `/mute` `/unmute` `/kick` `/ban` `/unban` `/purge` `/lock` `/unlock` `/slowmode` `/modlogs` `/clearlogs` `/nuke`", inline=False)
     e.add_field(name="⭐ Vouches", value="`/vouch` `/vouches` `/delvouch`", inline=False)
-    e.add_field(name="🎉 Giveaways", value="`/giveaway create` `/giveaway end` `/giveaway reroll`", inline=False)
+    e.add_field(name="🎉 Giveaways", value="`/giveaway create` `/giveaway end` `/giveaway reroll`\n*requirements: role · invites · messages · account age*", inline=False)
+    e.add_field(name="🎫 Tickets", value="`/ticket panel` `/ticket setrole`", inline=False)
     e.add_field(name="🛠️ Setup & build", value="`/setup channels` `/buildserver` `/embed create`", inline=False)
     await i.response.send_message(embed=e, ephemeral=True)
 
@@ -596,7 +1064,58 @@ async def on_message_delete(m):
 
 
 @bot.event
+async def on_message(message):
+    # count messages for giveaway requirements, then let commands run
+    if message.guild and not message.author.bot:
+        try:
+            bump_message(message.guild.id, message.author.id)
+        except Exception:
+            pass
+    await bot.process_commands(message)
+
+
+# -------- invite tracking (attribute joins to the inviter) --------
+invite_cache = {}  # guild_id -> {code: uses}
+
+
+async def refresh_invites(guild):
+    try:
+        invite_cache[guild.id] = {inv.code: inv.uses for inv in await guild.invites()}
+    except Exception:
+        invite_cache[guild.id] = invite_cache.get(guild.id, {})
+
+
+@bot.event
+async def on_invite_create(invite):
+    await refresh_invites(invite.guild)
+
+
+@bot.event
+async def on_invite_delete(invite):
+    await refresh_invites(invite.guild)
+
+
+@bot.event
 async def on_member_join(member):
+    # figure out who invited them, bump that inviter's count
+    try:
+        before = invite_cache.get(member.guild.id, {})
+        after = {inv.code: inv.uses for inv in await member.guild.invites()}
+        inviter_id = None
+        for code, uses in after.items():
+            if uses > before.get(code, 0):
+                inv = discord.utils.get(await member.guild.invites(), code=code)
+                if inv and inv.inviter:
+                    inviter_id = inv.inviter.id
+                break
+        invite_cache[member.guild.id] = after
+        if inviter_id and inviter_id != member.id:
+            g = store.invites.setdefault(str(member.guild.id), {})
+            g[str(inviter_id)] = g.get(str(inviter_id), 0) + 1
+            store.save()
+    except Exception:
+        pass
+
     ch = log_channel(member.guild, "log_channel")
     if ch:
         try:
@@ -621,7 +1140,10 @@ async def setup_hook():
     bot.tree.add_command(setup_group)
     bot.tree.add_command(embed_group)
     bot.tree.add_command(giveaway_group)
+    bot.tree.add_command(ticket_group)
     bot.add_view(GiveawayView())
+    bot.add_view(TicketPanelView())
+    bot.add_view(TicketCloseView())
     bot.loop.create_task(giveaway_loop())
 
 
@@ -639,6 +1161,8 @@ async def on_ready():
         print(f"I'm in {len(bot.guilds)} server(s):")
         for g in bot.guilds:
             print(f"   • {g.name}  (id {g.id})")
+    for g in bot.guilds:
+        await refresh_invites(g)
     if _synced:
         return
     _synced = True
