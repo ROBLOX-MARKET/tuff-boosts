@@ -205,6 +205,14 @@ def ticket_role_id(guild):
     return int(cfg) if cfg else TICKET_ROLE_DEFAULT
 
 
+def is_ticket_staff(member):
+    """Ticket staff = anyone with Administrator, or the configured staff role."""
+    if member.guild_permissions.administrator:
+        return True
+    rid = ticket_role_id(member.guild)
+    return any(r.id == rid for r in member.roles)
+
+
 # ----------------------------------------------------------------- bot
 intents = discord.Intents.default()
 intents.members = True
@@ -1187,15 +1195,10 @@ async def open_ticket(i, kind, pay=None, invoice=None):
                         "📦 **Having an issue with an order?** Please include your **order ID** "
                         "so we can find it quickly."))
     e.add_field(name="Opened by", value=i.user.mention, inline=True)
-    e.set_footer(text="Simple Boosts • Only staff can close this ticket")
+    e.set_footer(text="Simple Boosts • Staff can claim & close this ticket")
     await ch.send(content=f"{ping} {i.user.mention}".strip(),
                   embed=e, view=TicketCloseView(),
                   allowed_mentions=discord.AllowedMentions(roles=True, users=True))
-    if kind == "buy":
-        fee = PAY_FEE.get(pay)
-        await log_to(guild, "orders_channel", "🛒 New order",
-                     f"{i.user.mention} opened {ch.mention}\n"
-                     f"Payment: **{pay}**" + (f" (+{fee})" if fee else " (no fee)"))
     await i.followup.send(f"{em('sb_check','✅')} Ticket created: {ch.mention}", ephemeral=True)
 
 
@@ -1243,13 +1246,29 @@ class TicketCloseView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
+    @discord.ui.button(label="Claim", emoji="🙋",
+                       style=discord.ButtonStyle.primary, custom_id="tkt:claim")
+    async def claim(self, i: discord.Interaction, b: discord.ui.Button):
+        if not is_ticket_staff(i.user):
+            return await i.response.send_message(
+                "🔒 Only staff can claim tickets.", ephemeral=True)
+        meta = store.tickets.get(str(i.channel.id), {})
+        if meta.get("claimed_by"):
+            return await i.response.send_message(
+                f"Already claimed by <@{meta['claimed_by']}>.", ephemeral=True)
+        meta["claimed_by"] = i.user.id
+        store.tickets[str(i.channel.id)] = meta
+        store.save()
+        e = discord.Embed(description=f"🙋 Ticket claimed by {i.user.mention} — they'll help you from here.",
+                          colour=ACCENT)
+        await i.response.send_message(embed=e)
+
     @discord.ui.button(label="Close Ticket", emoji="🔒",
                        style=discord.ButtonStyle.danger, custom_id="tkt:close")
     async def close(self, i: discord.Interaction, b: discord.ui.Button):
-        role_id = ticket_role_id(i.guild)
-        if not any(r.id == role_id for r in i.user.roles):
+        if not is_ticket_staff(i.user):
             return await i.response.send_message(
-                "🔒 Only staff can close this ticket.", ephemeral=True)
+                "🔒 Only staff (or admins) can close this ticket.", ephemeral=True)
         await i.response.send_message("📦 Saving transcript & closing in a moment…", ephemeral=True)
         await close_ticket(i.channel, i.user)
 
