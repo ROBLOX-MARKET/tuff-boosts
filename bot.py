@@ -55,7 +55,8 @@ PAY_METHODS = [
 PAY_FEE = {name: fee for name, _e, fee in PAY_METHODS}
 
 # Custom emojis the bot uploads to the server (files live in ./emojis/<name>.png)
-EMOJI_FILES = ["sb_usdt", "sb_btc", "sb_ltc", "sb_ticket", "sb_boost"]
+EMOJI_FILES = ["sb_usdt", "sb_btc", "sb_ltc", "sb_ticket", "sb_boost",
+               "sb_check", "sb_star", "sb_arrow"]
 EMOJI = {}  # name -> discord.Emoji (filled at runtime by ensure_emojis)
 
 
@@ -469,16 +470,19 @@ def vouch_stats():
 def vouch_sticky_embed():
     n, avg = vouch_stats()
     stars = "⭐" * round(avg) if n else "—"
+    arr = em("sb_arrow", "›")
     e = discord.Embed(
-        title=f"{em('sb_boost', '⭐')}  How to leave a vouch",
+        title=f"{em('sb_star', '⭐')}  How to leave a vouch",
         colour=ACCENT,
         description=("Bought from us? Drop a vouch! 💜\n\n"
                      "Use **`/vouch`** and fill in:\n"
-                     "› **order** — your order ID\n"
-                     "› **rating** — 1 to 5 ⭐\n"
-                     "› **comment** — a few words about your experience"))
+                     f"{arr} **order** — your order ID\n"
+                     f"{arr} **rating** — 1 to 5 ⭐\n"
+                     f"{arr} **comment** — a few words about your experience"))
     e.add_field(name="📊 Total vouches", value=f"**{n}**", inline=True)
     e.add_field(name="⭐ Average rating", value=(f"**{avg:.1f} / 5**  {stars}" if n else "—"), inline=True)
+    if (BASE / "emojis" / "sb_star.png").exists():
+        e.set_thumbnail(url="attachment://logo.png")
     e.set_footer(text="Simple Boosts · Thank you for your support 💜")
     return e
 
@@ -496,7 +500,11 @@ async def update_vouch_sticky(guild):
         except Exception:
             pass
     try:
-        msg = await ch.send(embed=vouch_sticky_embed())
+        star = BASE / "emojis" / "sb_star.png"
+        kwargs = {"embed": vouch_sticky_embed()}
+        if star.exists():
+            kwargs["file"] = discord.File(star, filename="logo.png")
+        msg = await ch.send(**kwargs)
         store.config["vouch_sticky_id"] = msg.id
         store.save()
     except Exception as ex:
@@ -523,11 +531,12 @@ async def vouch(i: discord.Interaction, order: str, rating: int, comment: str):
     if ch:
         await ch.send(embed=e)
         await update_vouch_sticky(i.guild)   # bump the sticky back to the bottom
+        chk = em("sb_check", "✅")
         if ch.id != i.channel.id:
-            await i.response.send_message(f"✅ Thanks! Your vouch is posted in {ch.mention} 💜",
+            await i.response.send_message(f"{chk} Thanks! Your vouch is posted in {ch.mention} 💜",
                                           ephemeral=True)
         else:
-            await i.response.send_message("✅ Thanks for your vouch! 💜", ephemeral=True)
+            await i.response.send_message(f"{chk} Thanks for your vouch! 💜", ephemeral=True)
     else:
         await i.response.send_message(embed=e)
 
@@ -1122,7 +1131,7 @@ async def open_ticket(i, kind, pay=None, invoice=None):
         await log_to(guild, "orders_channel", "🛒 New order",
                      f"{i.user.mention} opened {ch.mention}\n"
                      f"Payment: **{pay}**" + (f" (+{fee})" if fee else " (no fee)"))
-    await i.followup.send(f"✅ Ticket created: {ch.mention}", ephemeral=True)
+    await i.followup.send(f"{em('sb_check','✅')} Ticket created: {ch.mention}", ephemeral=True)
 
 
 class PaymentSelect(discord.ui.View):
@@ -1190,37 +1199,47 @@ async def ticket_panel(i: discord.Interaction, banner: bool = True):
     await i.response.defer(ephemeral=True)
     await ensure_emojis(i.guild)
     tick = em("sb_ticket", "🎫")
-    paytxt = "  ".join(f"{em('sb_'+n.lower())} **{n}**" + (f" (+{f})" if f else "")
-                       for n, _e, f in PAY_METHODS)
-    body = discord.Embed(colour=ACCENT, title=f"{tick}  Simple Boosts Support",
-                         description="*Your #1 leading boost provider*")
+    arr = em("sb_arrow", "›")
+    paytxt = "   ".join(f"{em('sb_'+n.lower())} **{n}**" + (f" `+{f}`" if f else " `free`")
+                        for n, _e, f in PAY_METHODS)
+    body = discord.Embed(
+        colour=ACCENT,
+        title=f"{tick}  Simple Boosts Support",
+        description="**Your #1 leading boost provider**\n"
+                    "Open a ticket below and the right team will take care of you. 💜")
     body.add_field(
-        name="💬 How can we help?",
-        value="Pick the category that fits your request and the right team will pick it up.",
+        name=f"{em('sb_boost','💬')}  How can we help?",
+        value="Pick the category that fits your request from the menu below.",
         inline=False)
     body.add_field(
-        name="📌 Before you open a ticket",
-        value=("› Read the server **rules** before you open a ticket.\n"
-               "› Pick the **category** that matches your request.\n"
-               "› Issues with an order? Have your **order ID** ready."),
+        name="📌  Before you open a ticket",
+        value=(f"{arr} Read the server **rules** first.\n"
+               f"{arr} Pick the **category** that matches your request.\n"
+               f"{arr} Issue with an order? Have your **order ID** ready."),
         inline=False)
     body.add_field(
-        name="💳 Payments we accept",
-        value=f"{paytxt}\n*LTC has no fee · USDT & BTC have a $1 fee.*",
+        name=f"{em('sb_usdt','💳')}  Payments we accept",
+        value=f"{paytxt}\n*LTC is free · USDT & BTC have a $1 fee.*",
         inline=False)
     body.set_footer(text="Simple Boosts · Your #1 leading boost provider")
+
+    logo = None
+    if (BASE / "emojis" / "sb_boost.png").exists():
+        logo = discord.File(BASE / "emojis" / "sb_boost.png", filename="logo.png")
+        body.set_thumbnail(url="attachment://logo.png")
+
     embeds = [body]
-    file = None
+    files = [f for f in [logo] if f]
     if banner and BANNER_FILE.exists():
-        file = discord.File(BANNER_FILE, filename="banner.gif")
+        files.append(discord.File(BANNER_FILE, filename="banner.gif"))
         top = discord.Embed(colour=ACCENT)
         top.set_image(url="attachment://banner.gif")
         embeds = [top, body]   # banner renders ABOVE the content embed
     kwargs = {"embeds": embeds, "view": TicketPanelView()}
-    if file:
-        kwargs["file"] = file
+    if files:
+        kwargs["files"] = files
     await i.channel.send(**kwargs)
-    await i.followup.send("✅ Panel posted.", ephemeral=True)
+    await i.followup.send(f"{em('sb_check','✅')} Panel posted.", ephemeral=True)
 
 
 @ticket_group.command(name="setrole", description="🎫 Set which role is pinged & can close tickets")
