@@ -1090,6 +1090,36 @@ async def address_received(coin, address, expected, since_iso):
     return {"status": "none", "received": 0.0, "confirmed": False}
 
 
+async def verify_tx(coin, address, expected, txid):
+    """Verify a SPECIFIC transaction hash pays `address` ~`expected`. Proves the
+    payment is really the customer's. Returns dict(status, received, confirmed)."""
+    txid = txid.strip()
+    s = await _http()
+    try:
+        if coin in ("BTC", "LTC"):
+            tid = txid.lower().replace("0x", "")
+            if len(tid) < 60:
+                return {"status": "wrong", "received": 0.0, "confirmed": False}
+            base = "https://mempool.space/api" if coin == "BTC" else "https://litecoinspace.org/api"
+            async with s.get(f"{base}/tx/{tid}", timeout=aiohttp.ClientTimeout(total=20)) as r:
+                if r.status != 200:
+                    return {"status": "notfound", "received": 0.0, "confirmed": False}
+                tx = await r.json()
+            sats = sum(v.get("value", 0) for v in tx.get("vout", [])
+                       if v.get("scriptpubkey_address") == address)
+            amt = sats / 1e8
+            conf = bool(tx.get("status", {}).get("confirmed"))
+            if amt <= 0:
+                return {"status": "wrong", "received": 0.0, "confirmed": conf}
+            if amt >= expected * PAY_TOLERANCE:
+                return {"status": "paid", "received": amt, "confirmed": conf}
+            return {"status": "partial", "received": amt, "confirmed": conf}
+        # USDT (BEP-20): hash-level auto-verify needs a key/extra calls — hand to staff
+        return {"status": "manual", "received": 0.0, "confirmed": False}
+    except Exception as ex:
+        return {"status": "error", "received": 0.0, "confirmed": False, "error": str(ex)}
+
+
 def pay_fee_usd(coin):
     f = PAY_FEE.get(coin)
     try:
@@ -1143,6 +1173,10 @@ def invoice_embed(inv, paid=False):
             name="⚠️ Important",
             value="Send the **exact** amount. Underpay → **wait for a staff refund**. Please don't overpay.",
             inline=False)
+        e.add_field(
+            name="✅ After you've sent it",
+            value="Tap **✅ I've Paid** and paste your **transaction ID** so we can confirm it's your payment.",
+            inline=False)
         if inv.get("qr"):
             e.set_image(url="attachment://qr.png")
     e.set_footer(text="Simple Boosts · 🔴 live payment tracking")
@@ -1159,6 +1193,9 @@ def paid_embed(inv, res):
                      f"**Amount:** {res['received']:.8f} {inv['coin']}  (≈ ${inv['usd']:.2f})\n"
                      f"**Status:** {tag}\n\n"
                      "Thank you for your order — a staff member will complete it shortly. 💜"))
+    if inv.get("txid"):
+        tx = inv["txid"]
+        e.add_field(name="🧾 Transaction", value=f"`{tx if len(tx) <= 50 else tx[:47] + '…'}`", inline=False)
     if (BASE / "emojis" / "sb_check.png").exists():
         e.set_thumbnail(url="attachment://logo.png")
     e.set_footer(text="Simple Boosts")
@@ -1925,28 +1962,72 @@ class PaymentPanelView(discord.ui.View):
         await _pay_check(i)
 
 
+class TxIdModal(discord.ui.Modal, title="Confirm your payment"):
+    txid = discord.ui.TextInput(label="Transaction ID / hash",
+                                placeholder="Paste the TX hash from your wallet",
+                                required=True, max_length=150)
+
+    async def on_submit(self, i: discord.Interaction):
+        meta = store.tickets.get(str(i.channel.id), {})
+        inv = meta.get("invoice")
+        if not inv:
+            return await i.response.send_message("No active order on this ticket.", ephemeral=True)
+        await i.response.defer(ephemeral=True)
+        tx = str(self.txid).strip()
+        inv["txid"] = tx
+        store.save()
+        res = await verify_tx(inv["coin"], inv["address"], inv["amount"], tx)
+        st = res["status"]
+        coin = inv["coin"]
+        if st == "paid":
+            await complete_payment(i.channel, meta, inv, res)
+            await i.followup.send(
+                "✅ **Verified!** Your transaction pays the exact amount — staff have been notified. 💜",
+                ephemeral=True)
+        elif st == "partial":
+            await i.followup.send(
+                f"⚠️ That transaction only pays **{res['received']:.8f} {coin}** — that's **underpaid**. "
+                f"Please wait for a staff member to send it back (refund).", ephemeral=True)
+        elif st == "wrong":
+            await i.followup.send(
+                "❌ That transaction doesn't pay **our** address. Double-check you copied the right TX hash.",
+                ephemeral=True)
+        elif st == "notfound":
+            await i.followup.send(
+                "❌ Couldn't find that transaction yet. Give it a moment after sending, then try again.",
+                ephemeral=True)
+        elif st == "manual":
+            role = i.guild.get_role(ticket_role_id(i.guild))
+            await i.channel.send(
+                f"{role.mention if role else ''} 🧾 {i.user.mention} submitted a **{coin}** transaction "
+                f"to verify:\n`{tx}`",
+                allowed_mentions=discord.AllowedMentions(roles=True, users=True))
+            await i.followup.send("🧾 Thanks! Staff will verify your transaction shortly.", ephemeral=True)
+        else:
+            await i.followup.send("⚠️ Couldn't check that right now — try again in a moment.", ephemeral=True)
+
+
 class InvoicePanelView(discord.ui.View):
-    """Shown once an order is set — no Price List; clean customer + staff controls."""
+    """Shown once an order is set — customer confirms with their TX ID; no Set Order."""
     def __init__(self):
         super().__init__(timeout=None)
 
     @discord.ui.button(label="Copy Address", emoji="📋",
-                       style=discord.ButtonStyle.primary, custom_id="inv:copy", row=0)
+                       style=discord.ButtonStyle.secondary, custom_id="inv:copy", row=0)
     async def copyaddr(self, i, b):
         await _pay_copy(i)
 
-    @discord.ui.button(label="Track My Payment", emoji="🔔",
-                       style=discord.ButtonStyle.success, custom_id="inv:track", row=0)
-    async def track(self, i, b):
-        await _pay_track(i)
-
-    @discord.ui.button(label="Set Order", emoji="💲",
-                       style=discord.ButtonStyle.secondary, custom_id="inv:set", row=1)
-    async def setorder(self, i, b):
-        await _pay_setorder(i)
+    @discord.ui.button(label="I've Paid", emoji="✅",
+                       style=discord.ButtonStyle.success, custom_id="inv:paid", row=0)
+    async def paid(self, i, b):
+        meta = store.tickets.get(str(i.channel.id), {})
+        if not meta.get("invoice"):
+            return await i.response.send_message(
+                "⏳ Staff haven't set your total yet — hang tight!", ephemeral=True)
+        await i.response.send_modal(TxIdModal())
 
     @discord.ui.button(label="Check Payment", emoji="🔎",
-                       style=discord.ButtonStyle.secondary, custom_id="inv:check", row=1)
+                       style=discord.ButtonStyle.secondary, custom_id="inv:check", row=0)
     async def check(self, i, b):
         await _pay_check(i)
 
