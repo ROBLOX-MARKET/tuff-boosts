@@ -777,8 +777,7 @@ TRANSCRIPT_NAME = "📑┃transcripts"
 #   (label, description, emoji-name-or-unicode, kind)
 TICKET_CATEGORIES = [
     ("Purchase Boosts", "Order boosts — only if the website is down", "sb_boost", "buy"),
-    ("Support", "Questions, issues, or anything else", "💬", "support"),
-    ("Replacement", "Something stopped — you'll need your invoice ID", "🔁", "replacement"),
+    ("Support", "Order issues, questions, or anything else", "💬", "support"),
 ]
 
 
@@ -964,7 +963,7 @@ async def open_ticket(i, kind, pay=None, invoice=None):
         except Exception:
             cat = None
     safe = re.sub(r"[^a-z0-9]+", "-", i.user.name.lower()).strip("-") or "user"
-    prefix = {"buy": "order", "support": "support", "replacement": "replace"}.get(kind, "ticket")
+    prefix = {"buy": "order", "support": "support"}.get(kind, "ticket")
     try:
         ch = await guild.create_text_channel(
             f"{prefix}-{safe}", category=cat, overwrites=_ticket_overwrites(guild, i.user))
@@ -989,19 +988,14 @@ async def open_ticket(i, kind, pay=None, invoice=None):
                          "› Your server invite (if boosting a server)"))
         e.add_field(name="Payment", value=f"{pe} **{pay}**".strip(), inline=True)
         e.add_field(name="Fee", value=(f"+{fee}" if fee else "No fee"), inline=True)
-    elif kind == "replacement":
-        e = discord.Embed(
-            title="🔁  Replacement",
-            colour=ACCENT,
-            description="We'll get your replacement sorted. A staff member will verify your "
-                        "invoice and help you out.")
-        e.add_field(name="Invoice ID", value=f"`{invoice}`" if invoice else "—", inline=True)
     else:
         e = discord.Embed(
             title="💬  Support",
             colour=ACCENT,
-            description="Thanks for reaching out! Describe your issue in as much detail as you can "
-                        "and a staff member will help you out.")
+            description=("Thanks for reaching out! Describe your issue in as much detail as you "
+                        "can and a staff member will help you out.\n\n"
+                        "📦 **Having an issue with an order?** Please include your **order ID** "
+                        "so we can find it quickly."))
     e.add_field(name="Opened by", value=i.user.mention, inline=True)
     e.set_footer(text="Simple Boosts • Only staff can close this ticket")
     await ch.send(content=f"{ping} {i.user.mention}".strip(),
@@ -1027,14 +1021,6 @@ class PaymentSelect(discord.ui.View):
         await open_ticket(i, "buy", pay=self.sel.values[0])
 
 
-class ReplacementModal(discord.ui.Modal, title="Replacement request"):
-    invoice = discord.ui.TextInput(label="Your invoice ID", placeholder="e.g. INV-12345",
-                                   required=True, max_length=100)
-
-    async def on_submit(self, i: discord.Interaction):
-        await open_ticket(i, "replacement", invoice=str(self.invoice))
-
-
 class TicketPanelView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -1054,8 +1040,6 @@ class TicketPanelView(discord.ui.View):
                 "⚠️ **Only open a purchase ticket if the website is down.**\n"
                 "Otherwise please order on the website.\n\nSelect how you'd like to pay:",
                 view=PaymentSelect(), ephemeral=True)
-        elif kind == "replacement":
-            await i.response.send_modal(ReplacementModal())
         else:
             await open_ticket(i, "support")
 
@@ -1097,7 +1081,7 @@ async def ticket_panel(i: discord.Interaction, banner: bool = True):
         name="📌 Before you open a ticket",
         value=("› Read the server **rules** before you open a ticket.\n"
                "› Pick the **category** that matches your request.\n"
-               "› Replacements need your **invoice ID**."),
+               "› Issues with an order? Have your **order ID** ready."),
         inline=False)
     body.add_field(
         name="💳 Payments we accept",
