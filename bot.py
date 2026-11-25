@@ -304,6 +304,30 @@ async def setup_channels(i: discord.Interaction, modlog: discord.TextChannel = N
     await i.response.send_message("✅ Saved channel settings.", ephemeral=True)
 
 
+@setup_group.command(name="makechannel", description="📁 Create a channel as the bot")
+@app_commands.describe(name="Channel name", private="Only staff + you can see it?",
+                       category="Put it under this category (optional)")
+async def setup_makechannel(i: discord.Interaction, name: str, private: bool = False,
+                            category: discord.CategoryChannel = None):
+    guild = i.guild
+    ow = {}
+    if private:
+        role = guild.get_role(ticket_role_id(guild))
+        ow = {guild.default_role: discord.PermissionOverwrite(view_channel=False),
+              guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True),
+              i.user: discord.PermissionOverwrite(view_channel=True, send_messages=True)}
+        if role:
+            ow[role] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
+    try:
+        ch = await guild.create_text_channel(name, category=category, overwrites=ow)
+    except discord.Forbidden:
+        return await i.response.send_message(
+            "❌ I need the **Manage Channels** permission (give me Administrator).", ephemeral=True)
+    await i.response.send_message(
+        f"{em('sb_check','✅')} Created {ch.mention}" + (" 🔒 (private)" if private else ""),
+        ephemeral=True)
+
+
 # ================================================================= MODERATION
 @bot.tree.command(name="warn", description="⚠️ Warn a member")
 @is_admin()
@@ -1258,7 +1282,7 @@ async def help_cmd(i: discord.Interaction):
     e.add_field(name="⭐ Vouches", value="`/vouch order rating comment` `/vouches` `/delvouch`", inline=False)
     e.add_field(name="🎉 Giveaways", value="`/giveaway create` `/giveaway end` `/giveaway reroll`\n*requirements: role · invites · messages · account age*", inline=False)
     e.add_field(name="🎫 Tickets", value="`/ticket panel` `/ticket setrole`", inline=False)
-    e.add_field(name="🛠️ Setup & build", value="`/setup channels` `/buildserver` `/embed create`", inline=False)
+    e.add_field(name="🛠️ Setup & build", value="`/setup channels` `/setup makechannel` `/buildserver` `/embed create`", inline=False)
     await i.response.send_message(embed=e, ephemeral=True)
 
 
