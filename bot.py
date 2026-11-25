@@ -267,6 +267,7 @@ class MEBot(commands.Bot):
         await post_info_once()
         self.loop.create_task(tag_sync_loop())
         self.loop.create_task(crypto_daily_loop())
+        self.loop.create_task(nuke_general_loop())
 
     async def log_to(self, channel_id: int | None, embed: discord.Embed, file: discord.File | None = None) -> None:
         if not channel_id:
@@ -3877,6 +3878,120 @@ async def start_dashboard() -> None:
             log.info("Dashboard running on port %s (open, no password — set DASH_PASSWORD to lock it)", SERVER_PORT)
     except Exception:  # noqa: BLE001
         log.exception("Couldn't start the dashboard")
+
+
+# ===========================================================================
+# /buildserver — one command builds the whole server (channels, roles, logs)
+# ===========================================================================
+BS_BAR = "⠀┃⠀"  # (invisible space) ┃ (invisible space): Discord keeps it, no dashes
+
+
+def _bs_ch(emoji: str, name: str) -> str:
+    return f"{emoji}{BS_BAR}{name}"
+
+
+BS_ROLES = [("Owner", 0xFF3D9A), ("Admin", 0x19E0FF), ("Staff", 0x37D98A),
+            ("Customer", 0xFFCE4D), ("Booster", 0xF47FFF), ("Member", 0x8498A9)]
+BS_STAFF = {"Owner", "Admin", "Staff"}  # who can see the private logs
+BS_PLAN = [
+    {"cat": "📌 Important", "private": False, "channels": [
+        ("📜", "rules"), ("📢", "announcements"), ("🌐", "website"),
+        ("⭐", "vouches"), ("✈️", "telegram"), ("🎫", "support")]},
+    {"cat": "💬 Community", "private": False, "channels": [("💬", "general"), ("🎁", "giveaways")]},
+    {"cat": "🔒 Logs", "private": True, "channels": [
+        ("📝", "message-logs"), ("🛡️", "mod-logs"), ("🚪", "join-leave")]},
+]
+
+
+async def _bs_build(guild: discord.Guild) -> dict:
+    made = {"roles": 0, "cats": 0, "channels": 0}
+    roles: dict[str, discord.Role] = {}
+    for name, color in BS_ROLES:
+        r = discord.utils.get(guild.roles, name=name)
+        if not r:
+            r = await guild.create_role(name=name, colour=discord.Colour(color), reason="buildserver")
+            made["roles"] += 1
+        roles[name] = r
+
+    for block in BS_PLAN:
+        ow = None
+        if block["private"]:
+            ow = {guild.default_role: discord.PermissionOverwrite(view_channel=False),
+                  guild.me: discord.PermissionOverwrite(view_channel=True)}
+            for rn in BS_STAFF:
+                if roles.get(rn):
+                    ow[roles[rn]] = discord.PermissionOverwrite(view_channel=True)
+        cat = discord.utils.get(guild.categories, name=block["cat"])
+        if not cat:
+            cat = await guild.create_category(block["cat"], overwrites=ow or {}, reason="buildserver")
+            made["cats"] += 1
+        for emoji, nm in block["channels"]:
+            full = _bs_ch(emoji, nm).lower()
+            if discord.utils.get(guild.text_channels, name=full):
+                continue
+            await guild.create_text_channel(_bs_ch(emoji, nm), category=cat,
+                                            overwrites=ow or {}, reason="buildserver")
+            made["channels"] += 1
+    return made
+
+
+class BuildConfirm(discord.ui.View):
+    def __init__(self, author_id: int):
+        super().__init__(timeout=60)
+        self.author_id = author_id
+
+    async def interaction_check(self, i: discord.Interaction) -> bool:
+        return i.user.id == self.author_id
+
+    @discord.ui.button(label="Build it", style=discord.ButtonStyle.success)
+    async def go(self, i: discord.Interaction, _b: discord.ui.Button):
+        await i.response.edit_message(content="⚙️ Building… give it a few seconds.", view=None)
+        try:
+            made = await _bs_build(i.guild)
+        except discord.Forbidden:
+            await i.edit_original_response(
+                content="❌ I need the **Administrator** role, placed **above** the others. Fix that and run /buildserver again.")
+            return
+        await i.edit_original_response(
+            content=f"✅ Done — **{made['cats']}** categories, **{made['channels']}** channels, "
+                    f"**{made['roles']}** roles. #general auto-wipes every 24h; Logs are staff-only.")
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def no(self, i: discord.Interaction, _b: discord.ui.Button):
+        await i.response.edit_message(content="Cancelled.", view=None)
+
+
+@bot.tree.command(name="buildserver", description="🏗️ Build the whole server: channels, roles, private logs.")
+async def buildserver(interaction: discord.Interaction) -> None:
+    if not interaction.guild:
+        await interaction.response.send_message("Run this in the server.", ephemeral=True)
+        return
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("You need **Administrator** to run this.", ephemeral=True)
+        return
+    total = sum(len(b["channels"]) for b in BS_PLAN)
+    await interaction.response.send_message(
+        f"This will create **{len(BS_PLAN)}** categories, **{total}** channels and **{len(BS_ROLES)}** roles "
+        "(skips any that already exist). Build it?",
+        view=BuildConfirm(interaction.user.id), ephemeral=True)
+
+
+async def nuke_general_loop() -> None:
+    """Every 24h, wipe #general by cloning it and deleting the old one."""
+    await bot.wait_until_ready()
+    while not bot.is_closed():
+        await asyncio.sleep(24 * 3600)
+        for guild in bot.guilds:
+            ch = next((c for c in guild.text_channels if c.name.endswith("general")), None)
+            if not ch:
+                continue
+            try:
+                new = await ch.clone(reason="24h auto-nuke")
+                await new.edit(position=ch.position)
+                await ch.delete(reason="24h auto-nuke")
+                log.info("Auto-nuked #general in %s", guild.name)
+            except Exception:  # noqa: BLE001
+                log.exception("general nuke failed")
 
 
 if __name__ == "__main__":
