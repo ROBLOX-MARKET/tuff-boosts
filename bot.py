@@ -162,15 +162,16 @@ PERIOD_LABEL = {"day": "today", "week": "this week", "month": "this month", "all
 
 def requirement_lines(gw):
     """Human-readable list of a giveaway's entry requirements (for the embed)."""
+    b = em("sb_arrow", "›")
     out = []
     if gw.get("req_role"):
-        out.append(f"• Must have <@&{gw['req_role']}>")
+        out.append(f"{b} Must have <@&{gw['req_role']}>")
     if gw.get("req_invites"):
-        out.append(f"• **{gw['req_invites']}+** invites")
+        out.append(f"{b} **{gw['req_invites']}+** invites")
     if gw.get("req_msgs"):
-        out.append(f"• **{gw['req_msgs']}+** messages {PERIOD_LABEL.get(gw.get('req_period','all'))}")
+        out.append(f"{b} **{gw['req_msgs']}+** messages {PERIOD_LABEL.get(gw.get('req_period','all'))}")
     if gw.get("req_age_days"):
-        out.append(f"• Account **{gw['req_age_days']}+** days old")
+        out.append(f"{b} Account **{gw['req_age_days']}+** days old")
     return out
 
 
@@ -220,7 +221,8 @@ def log_channel(guild, key="modlog_channel"):
     # fallback: find by name
     names = {"modlog_channel": "mod-logs", "msglog_channel": "message-logs",
              "log_channel": "join-leave", "vouchlog_channel": "vouch-logs",
-             "orders_channel": "orders", "vouch_channel": "vouches"}
+             "gwlog_channel": "giveaway-logs", "orders_channel": "orders",
+             "vouch_channel": "vouches"}
     want = names.get(key, "")
     return next((c for c in guild.text_channels if c.name.endswith(want)), None) if want else None
 
@@ -251,7 +253,8 @@ async def log_to(guild, key, title, desc, colour=ACCENT):
 
 
 # The private, staff-only channels the bot keeps around for logging.
-LOG_CHANNELS = ["message-logs", "mod-logs", "join-leave", "vouch-logs", "orders"]
+LOG_CHANNELS = ["message-logs", "mod-logs", "join-leave", "vouch-logs",
+                "giveaway-logs", "orders"]
 
 
 async def ensure_log_channels(guild):
@@ -283,11 +286,12 @@ setup_group = app_commands.Group(name="setup", description="Configure the bot",
 @setup_group.command(name="channels", description="Point the bot's log channels wherever you want")
 @app_commands.describe(modlog="Mod actions", messagelog="Message edits/deletes",
                        joinleave="Joins/leaves", vouches="Where vouches post",
-                       vouchlog="Vouch log (staff)", orders="Order log (staff)")
+                       vouchlog="Vouch log (staff)", giveawaylog="Giveaway log (staff)",
+                       orders="Order log (staff)")
 async def setup_channels(i: discord.Interaction, modlog: discord.TextChannel = None,
                          messagelog: discord.TextChannel = None, joinleave: discord.TextChannel = None,
                          vouches: discord.TextChannel = None, vouchlog: discord.TextChannel = None,
-                         orders: discord.TextChannel = None):
+                         giveawaylog: discord.TextChannel = None, orders: discord.TextChannel = None):
     if modlog:
         store.config["modlog_channel"] = modlog.id
     if messagelog:
@@ -298,6 +302,8 @@ async def setup_channels(i: discord.Interaction, modlog: discord.TextChannel = N
         store.config["vouch_channel"] = vouches.id
     if vouchlog:
         store.config["vouchlog_channel"] = vouchlog.id
+    if giveawaylog:
+        store.config["gwlog_channel"] = giveawaylog.id
     if orders:
         store.config["orders_channel"] = orders.id
     store.save()
@@ -679,25 +685,37 @@ class GiveawayView(discord.ui.View):
 def gw_embed(gw):
     end = datetime.fromisoformat(gw["end"])
     ended = gw.get("ended")
-    spark = em("sb_boost", "🎉")
-    e = discord.Embed(
-        title=f"{spark}  {gw['prize']}",
-        colour=0x5A2DA6 if ended else ACCENT,
-        description=("🎊 **This giveaway has ended!**\nThanks to everyone who entered." if ended
-                     else "Press **🎉 Enter** below for your chance to win!"),
-    )
     ts = int(end.timestamp())
-    e.add_field(name="⏳ Ended" if ended else "⏳ Ends",
-                value=f"<t:{ts}:R>" if not ended else f"<t:{ts}:f>", inline=True)
+    boost = em("sb_boost", "🎉")
+    star = em("sb_star", "⭐")
+    n = len(gw.get("entrants", []))
+    if ended:
+        desc = (f"{star}  **This giveaway has ended!**\n"
+                f"Thanks to everyone who entered — winners are below. 💜")
+    else:
+        desc = (f"{boost}  **GIVEAWAY**  {boost}\n\n"
+                f"Press **🎉 Enter** below for your chance to win!\n"
+                f"Ends <t:{ts}:R>  •  <t:{ts}:f>")
+    e = discord.Embed(
+        title=f"🎁  {gw['prize']}",
+        colour=0x5A2DA6 if ended else ACCENT,
+        description=desc)
     e.add_field(name="🏆 Winners", value=f"**{gw['winners']}**", inline=True)
-    e.add_field(name="👥 Entries", value=f"**{len(gw.get('entrants', []))}**", inline=True)
+    e.add_field(name="👥 Entries", value=f"**{n}**", inline=True)
+    e.add_field(name="🎀 Host", value=f"<@{gw['host_id']}>", inline=True)
     reqs = requirement_lines(gw)
     if reqs:
         e.add_field(name="📋 Requirements to enter", value="\n".join(reqs), inline=False)
-    e.add_field(name="🎀 Hosted by", value=f"<@{gw['host_id']}>", inline=False)
-    e.set_footer(text="Simple Boosts • Good luck! 🍀")
+    if (BASE / "emojis" / "sb_boost.png").exists():
+        e.set_thumbnail(url="attachment://logo.png")
+    e.set_footer(text="Simple Boosts  •  Good luck! 🍀")
     e.timestamp = end
     return e
+
+
+def _gw_logo():
+    p = BASE / "emojis" / "sb_boost.png"
+    return discord.File(p, filename="logo.png") if p.exists() else None
 
 
 giveaway_group = app_commands.Group(name="giveaway", description="Giveaways",
@@ -740,10 +758,19 @@ async def gw_create(i: discord.Interaction, duration: str, winners: int, prize: 
           "req_msgs": max(0, required_messages),
           "req_period": (message_period.value if message_period else "all"),
           "req_age_days": max(0, min_account_age_days)}
-    await i.response.send_message("🎉 Giveaway started!", ephemeral=True)
-    msg = await i.channel.send(embed=gw_embed(gw), view=GiveawayView())
+    await i.response.send_message(f"{em('sb_check','✅')} Giveaway started!", ephemeral=True)
+    logo = _gw_logo()
+    kwargs = {"embed": gw_embed(gw), "view": GiveawayView()}
+    if logo:
+        kwargs["file"] = logo
+    msg = await i.channel.send(**kwargs)
     store.giveaways[str(msg.id)] = gw
     store.save()
+    reqs = requirement_lines(gw)
+    await log_to(i.guild, "gwlog_channel", "🎉 Giveaway started",
+                 f"**Prize:** {prize}\n**Winners:** {winners}\n**Ends:** <t:{int(end.timestamp())}:R>\n"
+                 f"**Host:** {i.user.mention}\n**Channel:** {i.channel.mention}"
+                 + (("\n**Requirements:**\n" + "\n".join(reqs)) if reqs else ""))
 
 
 def _pick_winners(gw, guild):
@@ -774,6 +801,8 @@ async def end_giveaway(msg_id, gw, guild):
     link = msg.jump_url if msg else ""
     if not ent:
         await ch.send(f"🎉 Giveaway for **{gw['prize']}** ended — no entries 😔")
+        await log_to(guild, "gwlog_channel", "🎉 Giveaway ended",
+                     f"**Prize:** {gw['prize']}\nNo entries.")
         if msg:
             try:
                 await msg.edit(embed=gw_embed(gw), view=None)
@@ -783,16 +812,26 @@ async def end_giveaway(msg_id, gw, guild):
     winners = _pick_winners(gw, guild)
     if not winners:
         await ch.send(f"🎉 **{gw['prize']}** ended — no eligible entrants met the requirements 😔")
+        await log_to(guild, "gwlog_channel", "🎉 Giveaway ended",
+                     f"**Prize:** {gw['prize']}\n{len(ent)} entries — none eligible.")
     else:
         mentions = ", ".join(f"<@{w}>" for w in winners)
         gw["last_winners"] = winners
         store.save()
-        e = discord.Embed(title="🎉 GIVEAWAY ENDED", colour=0x3BA55D,
-                          description=f"**Prize:** {gw['prize']}\n**Winner(s):** {mentions}\n\nCongratulations! 🥳")
+        boost = em("sb_boost", "🎉")
+        e = discord.Embed(title=f"{boost}  GIVEAWAY ENDED", colour=0x5A2DA6,
+                          description=f"🎁 **{gw['prize']}**\n\n🏆 **Winner(s):** {mentions}\n\nCongratulations! 🥳")
         if link:
             e.add_field(name="Giveaway", value=f"[Jump to message]({link})")
-        e.set_footer(text=f"{len(ent)} total entries")
-        await ch.send(content=mentions, embed=e)
+        e.set_footer(text=f"{len(ent)} total entries • Simple Boosts")
+        logo = _gw_logo()
+        if logo:
+            e.set_thumbnail(url="attachment://logo.png")
+            await ch.send(content=mentions, embed=e, file=logo)
+        else:
+            await ch.send(content=mentions, embed=e)
+        await log_to(guild, "gwlog_channel", "🎉 Giveaway ended",
+                     f"**Prize:** {gw['prize']}\n**Winner(s):** {mentions}\n**Entries:** {len(ent)}")
     if msg:
         try:
             await msg.edit(embed=gw_embed(gw), view=None)
@@ -822,6 +861,8 @@ async def gw_reroll(i: discord.Interaction, message_id: str):
     if not w:
         return await i.response.send_message("No eligible entrant to reroll.", ephemeral=True)
     await i.response.send_message(f"🔄 New winner of **{gw['prize']}**: <@{w[0]}> 🥳")
+    await log_to(i.guild, "gwlog_channel", "🔄 Giveaway reroll",
+                 f"**Prize:** {gw['prize']}\n**New winner:** <@{w[0]}>\n**By:** {i.user.mention}")
 
 
 async def giveaway_loop():
