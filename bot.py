@@ -43,11 +43,14 @@ BANNER_FILE = BASE / "banner.gif"
 # Override by setting TICKET_ROLE in env, else this default.
 TICKET_ROLE_DEFAULT = 1575014415458111551
 
+# Vouch channel — where vouches post and the sticky "how to vouch" message lives.
+VOUCH_CHANNEL_DEFAULT = 1575014425948070069
+
 # Payment methods for purchase tickets: (name, custom-emoji name, fee text or None)
 PAY_METHODS = [
-    ("USDT", "sb_usdt", None),
+    ("USDT", "sb_usdt", "$1"),
     ("BTC",  "sb_btc",  "$1"),
-    ("LTC",  "sb_ltc",  "$1"),
+    ("LTC",  "sb_ltc",  None),
 ]
 PAY_FEE = {name: fee for name, _e, fee in PAY_METHODS}
 
@@ -79,7 +82,8 @@ class Store:
         d = _load()
         self.config = d.get("config", {})       # modlog_channel, vouch_channel, log_channel
         self.cases = d.get("cases", {})          # user_id -> [ {type, reason, mod, at} ]
-        self.vouches = d.get("vouches", {})      # seller_id -> [ {stars, text, by, at} ]
+        v = d.get("vouches", [])                 # list of {order, stars, text, by, by_id, at}
+        self.vouches = v if isinstance(v, list) else []   # migrate old per-seller dict -> fresh list
         self.giveaways = d.get("giveaways", {})  # message_id -> {...}
         self.msgs = d.get("msgs", {})            # guild_id -> user_id -> {"YYYY-MM-DD": count}
         self.invites = d.get("invites", {})      # guild_id -> inviter_id -> count
@@ -213,7 +217,9 @@ def log_channel(guild, key="modlog_channel"):
         if ch:
             return ch
     # fallback: find by name
-    names = {"modlog_channel": "mod-logs", "log_channel": "join-leave", "vouch_channel": "vouches"}
+    names = {"modlog_channel": "mod-logs", "msglog_channel": "message-logs",
+             "log_channel": "join-leave", "vouchlog_channel": "vouch-logs",
+             "orders_channel": "orders", "vouch_channel": "vouches"}
     want = names.get(key, "")
     return next((c for c in guild.text_channels if c.name.endswith(want)), None) if want else None
 
@@ -233,22 +239,66 @@ async def modlog(guild, title, desc, colour=ACCENT):
             pass
 
 
+async def log_to(guild, key, title, desc, colour=ACCENT):
+    """Send a log embed to one of the named log channels (orders / vouch-logs / etc.)."""
+    ch = log_channel(guild, key)
+    if ch:
+        try:
+            await ch.send(embed=discord.Embed(title=title, description=desc, colour=colour, timestamp=now()))
+        except Exception:
+            pass
+
+
+# The private, staff-only channels the bot keeps around for logging.
+LOG_CHANNELS = ["message-logs", "mod-logs", "join-leave", "vouch-logs", "orders"]
+
+
+async def ensure_log_channels(guild):
+    """Create any missing log channels as PRIVATE (staff + bot only)."""
+    role = guild.get_role(ticket_role_id(guild))
+    ow = {guild.default_role: discord.PermissionOverwrite(view_channel=False),
+          guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True)}
+    if role:
+        ow[role] = discord.PermissionOverwrite(view_channel=True, send_messages=False,
+                                               read_message_history=True)
+    cat = discord.utils.get(guild.categories, name="🔒 Logs")
+    for nm in LOG_CHANNELS:
+        if any(c.name.endswith(nm) for c in guild.text_channels):
+            continue
+        try:
+            if cat is None:
+                cat = await guild.create_category("🔒 Logs", overwrites=ow)
+            await guild.create_text_channel(nm, category=cat, overwrites=ow)
+            print(f"📁 created private #{nm}")
+        except Exception as ex:
+            print(f"ensure channel {nm}: {ex}")
+
+
 # ====================================================================== SETUP
 setup_group = app_commands.Group(name="setup", description="Configure the bot",
                                  default_permissions=discord.Permissions(administrator=True))
 
 
-@setup_group.command(name="channels", description="Set the mod-log, vouch and join/leave channels")
-@app_commands.describe(modlog="Where mod actions are logged", vouches="Where vouches post",
-                       joinleave="Where joins/leaves are logged")
+@setup_group.command(name="channels", description="Point the bot's log channels wherever you want")
+@app_commands.describe(modlog="Mod actions", messagelog="Message edits/deletes",
+                       joinleave="Joins/leaves", vouches="Where vouches post",
+                       vouchlog="Vouch log (staff)", orders="Order log (staff)")
 async def setup_channels(i: discord.Interaction, modlog: discord.TextChannel = None,
-                         vouches: discord.TextChannel = None, joinleave: discord.TextChannel = None):
+                         messagelog: discord.TextChannel = None, joinleave: discord.TextChannel = None,
+                         vouches: discord.TextChannel = None, vouchlog: discord.TextChannel = None,
+                         orders: discord.TextChannel = None):
     if modlog:
         store.config["modlog_channel"] = modlog.id
-    if vouches:
-        store.config["vouch_channel"] = vouches.id
+    if messagelog:
+        store.config["msglog_channel"] = messagelog.id
     if joinleave:
         store.config["log_channel"] = joinleave.id
+    if vouches:
+        store.config["vouch_channel"] = vouches.id
+    if vouchlog:
+        store.config["vouchlog_channel"] = vouchlog.id
+    if orders:
+        store.config["orders_channel"] = orders.id
     store.save()
     await i.response.send_message("✅ Saved channel settings.", ephemeral=True)
 
@@ -405,45 +455,108 @@ async def nuke(i: discord.Interaction):
 
 
 # ===================================================================== VOUCHES
-@bot.tree.command(name="vouch", description="⭐ Vouch for someone you bought from")
-@app_commands.describe(seller="Who you're vouching for", stars="1-5", comment="Your review")
-async def vouch(i: discord.Interaction, seller: discord.Member, stars: int, comment: str):
-    if seller.id == i.user.id:
-        return await i.response.send_message("You can't vouch for yourself.", ephemeral=True)
-    stars = max(1, min(5, stars))
-    store.vouches.setdefault(str(seller.id), []).append(
-        {"stars": stars, "text": comment, "by": str(i.user), "at": now().isoformat()})
+def vouch_channel_id():
+    cfg = store.config.get("vouch_channel_id") or store.config.get("vouch_channel")
+    return int(cfg) if cfg else VOUCH_CHANNEL_DEFAULT
+
+
+def vouch_stats():
+    n = len(store.vouches)
+    avg = (sum(v["stars"] for v in store.vouches) / n) if n else 0
+    return n, avg
+
+
+def vouch_sticky_embed():
+    n, avg = vouch_stats()
+    stars = "⭐" * round(avg) if n else "—"
+    e = discord.Embed(
+        title=f"{em('sb_boost', '⭐')}  How to leave a vouch",
+        colour=ACCENT,
+        description=("Bought from us? Drop a vouch! 💜\n\n"
+                     "Use **`/vouch`** and fill in:\n"
+                     "› **order** — your order ID\n"
+                     "› **rating** — 1 to 5 ⭐\n"
+                     "› **comment** — a few words about your experience"))
+    e.add_field(name="📊 Total vouches", value=f"**{n}**", inline=True)
+    e.add_field(name="⭐ Average rating", value=(f"**{avg:.1f} / 5**  {stars}" if n else "—"), inline=True)
+    e.set_footer(text="Simple Boosts · Thank you for your support 💜")
+    return e
+
+
+async def update_vouch_sticky(guild):
+    """Keep one 'how to vouch' + count message pinned to the bottom of the vouch channel."""
+    ch = guild.get_channel(vouch_channel_id())
+    if ch is None:
+        return
+    old_id = store.config.get("vouch_sticky_id")
+    if old_id:
+        try:
+            old = await ch.fetch_message(int(old_id))
+            await old.delete()
+        except Exception:
+            pass
+    try:
+        msg = await ch.send(embed=vouch_sticky_embed())
+        store.config["vouch_sticky_id"] = msg.id
+        store.save()
+    except Exception as ex:
+        print("vouch sticky:", ex)
+
+
+@bot.tree.command(name="vouch", description="⭐ Leave a vouch for your order")
+@app_commands.describe(order="Your order ID", rating="1-5 stars", comment="How was it?")
+async def vouch(i: discord.Interaction, order: str, rating: int, comment: str):
+    rating = max(1, min(5, rating))
+    rec = {"order": order, "stars": rating, "text": comment,
+           "by": str(i.user), "by_id": i.user.id, "at": now().isoformat()}
+    store.vouches.append(rec)
     store.save()
-    e = discord.Embed(description=f"{'⭐' * stars}\n\n> {comment}", colour=WARN, timestamp=now())
-    e.set_author(name=f"Vouch for {seller.display_name}", icon_url=seller.display_avatar.url)
-    e.set_footer(text=f"by {i.user}")
-    ch = log_channel(i.guild, "vouch_channel")
-    if ch and ch.id != i.channel.id:
+    num = len(store.vouches)
+    e = discord.Embed(description=f"{'⭐' * rating}\n\n> {comment}", colour=ACCENT, timestamp=now())
+    e.set_author(name=f"{i.user.display_name} vouched", icon_url=i.user.display_avatar.url)
+    e.add_field(name="Order", value=f"`{order}`", inline=True)
+    e.add_field(name="Rating", value=f"{rating}/5", inline=True)
+    e.set_footer(text=f"Vouch #{num} · Simple Boosts")
+    await log_to(i.guild, "vouchlog_channel", f"⭐ New vouch #{num}",
+                 f"By {i.user.mention} (`{i.user}`)\nOrder: `{order}` · {rating}/5\n> {comment}")
+    ch = i.guild.get_channel(vouch_channel_id())
+    if ch:
         await ch.send(embed=e)
-        await i.response.send_message(f"✅ Vouch posted in {ch.mention}!", ephemeral=True)
+        await update_vouch_sticky(i.guild)   # bump the sticky back to the bottom
+        if ch.id != i.channel.id:
+            await i.response.send_message(f"✅ Thanks! Your vouch is posted in {ch.mention} 💜",
+                                          ephemeral=True)
+        else:
+            await i.response.send_message("✅ Thanks for your vouch! 💜", ephemeral=True)
     else:
         await i.response.send_message(embed=e)
 
 
-@bot.tree.command(name="vouches", description="🔎 See someone's vouches")
-async def vouches(i: discord.Interaction, seller: discord.Member):
-    vs = store.vouches.get(str(seller.id), [])
-    if not vs:
-        return await i.response.send_message(f"{seller.mention} has no vouches yet.", ephemeral=True)
-    avg = sum(v["stars"] for v in vs) / len(vs)
-    e = discord.Embed(title=f"{seller.display_name}'s vouches",
-                      description=f"**{len(vs)}** vouches · avg {avg:.1f}⭐", colour=WARN)
-    for v in vs[-10:]:
-        e.add_field(name=f"{'⭐' * v['stars']} · {v['by']}", value=v["text"][:200], inline=False)
-    await i.response.send_message(embed=e)
+@bot.tree.command(name="vouches", description="🔎 See the total vouch count & rating")
+async def vouches(i: discord.Interaction):
+    n, avg = vouch_stats()
+    if not n:
+        return await i.response.send_message("No vouches yet — be the first! ⭐", ephemeral=True)
+    e = discord.Embed(title="⭐ Vouches", colour=ACCENT,
+                      description=f"**{n}** total vouches · average **{avg:.1f} / 5**")
+    for v in store.vouches[-8:][::-1]:
+        e.add_field(name=f"{'⭐' * v['stars']} · {v.get('by','?')}",
+                    value=f"`{v.get('order','—')}` — {v['text'][:150]}", inline=False)
+    await i.response.send_message(embed=e, ephemeral=True)
 
 
-@bot.tree.command(name="delvouch", description="🗑️ Delete someone's vouches (admin)")
+@bot.tree.command(name="delvouch", description="🗑️ Delete a vouch by its number (admin)")
+@app_commands.describe(number="The vouch number (see the footer on the vouch message)")
 @is_admin()
-async def delvouch(i: discord.Interaction, seller: discord.Member):
-    store.vouches.pop(str(seller.id), None)
+async def delvouch(i: discord.Interaction, number: int):
+    if number < 1 or number > len(store.vouches):
+        return await i.response.send_message("No vouch with that number.", ephemeral=True)
+    removed = store.vouches.pop(number - 1)
     store.save()
-    await i.response.send_message(f"🗑️ Cleared {seller.mention}'s vouches.", ephemeral=True)
+    await update_vouch_sticky(i.guild)
+    await log_to(i.guild, "vouchlog_channel", "🗑️ Vouch deleted",
+                 f"Vouch #{number} (order `{removed.get('order','—')}`) removed by {i.user.mention}", BAD)
+    await i.response.send_message(f"🗑️ Deleted vouch #{number}.", ephemeral=True)
 
 
 # =================================================================== /embed
@@ -1004,6 +1117,11 @@ async def open_ticket(i, kind, pay=None, invoice=None):
     await ch.send(content=f"{ping} {i.user.mention}".strip(),
                   embed=e, view=TicketCloseView(),
                   allowed_mentions=discord.AllowedMentions(roles=True, users=True))
+    if kind == "buy":
+        fee = PAY_FEE.get(pay)
+        await log_to(guild, "orders_channel", "🛒 New order",
+                     f"{i.user.mention} opened {ch.mention}\n"
+                     f"Payment: **{pay}**" + (f" (+{fee})" if fee else " (no fee)"))
     await i.followup.send(f"✅ Ticket created: {ch.mention}", ephemeral=True)
 
 
@@ -1088,7 +1206,7 @@ async def ticket_panel(i: discord.Interaction, banner: bool = True):
         inline=False)
     body.add_field(
         name="💳 Payments we accept",
-        value=f"{paytxt}\n*USDT has no fee · BTC & LTC have a $1 fee.*",
+        value=f"{paytxt}\n*LTC has no fee · USDT & BTC have a $1 fee.*",
         inline=False)
     body.set_footer(text="Simple Boosts · Your #1 leading boost provider")
     embeds = [body]
@@ -1118,7 +1236,7 @@ async def help_cmd(i: discord.Interaction):
     e = discord.Embed(title="📖 Commands", colour=ACCENT)
     e.add_field(name="🔨 Moderation",
                 value="`/warn` `/mute` `/unmute` `/kick` `/ban` `/unban` `/purge` `/lock` `/unlock` `/slowmode` `/modlogs` `/clearlogs` `/nuke`", inline=False)
-    e.add_field(name="⭐ Vouches", value="`/vouch` `/vouches` `/delvouch`", inline=False)
+    e.add_field(name="⭐ Vouches", value="`/vouch order rating comment` `/vouches` `/delvouch`", inline=False)
     e.add_field(name="🎉 Giveaways", value="`/giveaway create` `/giveaway end` `/giveaway reroll`\n*requirements: role · invites · messages · account age*", inline=False)
     e.add_field(name="🎫 Tickets", value="`/ticket panel` `/ticket setrole`", inline=False)
     e.add_field(name="🛠️ Setup & build", value="`/setup channels` `/buildserver` `/embed create`", inline=False)
@@ -1130,11 +1248,28 @@ async def help_cmd(i: discord.Interaction):
 async def on_message_delete(m):
     if not m.guild or m.author.bot:
         return
-    ch = log_channel(m.guild, "modlog_channel")
+    ch = log_channel(m.guild, "msglog_channel")   # message logs, NOT mod-logs
     if ch:
         e = discord.Embed(description=(m.content or "*no text*")[:3000], colour=BAD, timestamp=now())
         e.set_author(name=f"Message deleted · {m.author}", icon_url=m.author.display_avatar.url)
         e.add_field(name="Channel", value=m.channel.mention)
+        try:
+            await ch.send(embed=e)
+        except Exception:
+            pass
+
+
+@bot.event
+async def on_message_edit(before, after):
+    if not before.guild or before.author.bot or before.content == after.content:
+        return
+    ch = log_channel(before.guild, "msglog_channel")
+    if ch:
+        e = discord.Embed(colour=WARN, timestamp=now())
+        e.set_author(name=f"Message edited · {before.author}", icon_url=before.author.display_avatar.url)
+        e.add_field(name="Before", value=(before.content or "—")[:1000], inline=False)
+        e.add_field(name="After", value=(after.content or "—")[:1000], inline=False)
+        e.add_field(name="Channel", value=before.channel.mention, inline=False)
         try:
             await ch.send(embed=e)
         except Exception:
@@ -1149,6 +1284,12 @@ async def on_message(message):
             bump_message(message.guild.id, message.author.id)
         except Exception:
             pass
+        # keep the "how to vouch" sticky pinned to the bottom of the vouch channel
+        if message.channel.id == vouch_channel_id():
+            try:
+                await update_vouch_sticky(message.guild)
+            except Exception:
+                pass
     await bot.process_commands(message)
 
 
@@ -1242,6 +1383,8 @@ async def on_ready():
     for g in bot.guilds:
         await refresh_invites(g)
         await ensure_emojis(g)
+        await ensure_log_channels(g)
+        await update_vouch_sticky(g)
     if _synced:
         return
     _synced = True
