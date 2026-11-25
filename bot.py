@@ -547,12 +547,13 @@ def vouch_stats():
 
 def vouch_sticky_embed():
     n, avg = vouch_stats()
-    rating = f"{avg:.1f}/5 ⭐" if n else "—"
+    star = em("sb_star", "⭐")
+    rating = f"{avg:.1f}/5" if n else "—"
     e = discord.Embed(
         colour=ACCENT,
-        description=(f"{em('sb_star','⭐')} **Leave a vouch** with **`/vouch`** "
-                     f"(order · rating · comment)\n"
-                     f"**{n}** vouches · avg **{rating}**"))
+        title=f"{star}  Leave a Vouch",
+        description=(f"Bought from us? Use **`/vouch`**  `order`  `rating`  `comment`\n"
+                     f"{em('sb_check','✅')} **{n}** vouches  ·  {star} avg **{rating}**"))
     return e
 
 
@@ -2130,6 +2131,39 @@ async def prices_cmd(i: discord.Interaction):
         await i.response.send_message(embed=prices_embed(), file=f)
     else:
         await i.response.send_message(embed=prices_embed())
+
+
+@bot.tree.command(name="rules", description="📜 Post the server rules embed")
+@is_admin()
+@app_commands.describe(channel="Where to post (default: here)")
+async def rules_cmd(i: discord.Interaction, channel: discord.TextChannel = None):
+    await i.response.defer(ephemeral=True)
+    await ensure_emojis(i.guild)
+    ch = channel or i.channel
+    arr = em("sb_arrow", "›")
+    tick = em("sb_ticket", "📜")
+    usdt, btc, ltc = em("sb_usdt"), em("sb_btc"), em("sb_ltc")
+    star, boost, check = em("sb_star", "⭐"), em("sb_boost", "🎉"), em("sb_check", "✅")
+    desc = (
+        "By staying in **Simple Boosts** and placing an order, you agree to the rules below.\n\n"
+        f"{arr} **Be respectful** — no spam, drama, harassment or slurs.\n"
+        f"{arr} **No scamming or chargebacks** — ever. It's an instant ban.\n"
+        f"{arr} **All orders go through a ticket** — keep deals in your ticket.\n"
+        f"{arr} Only open a **purchase ticket if the website is down**, otherwise order on the site.\n"
+        f"{arr} We accept {usdt} **USDT**  ·  {btc} **BTC**  ·  {ltc} **LTC** — always send the "
+        f"**exact** amount. Underpay and you **wait for a staff refund**; never overpay.\n"
+        f"{arr} **Issue with an order?** Open a **Support** ticket and have your **order ID** ready.\n"
+        f"{arr} **No advertising** other servers or shops, and no DM-advertising members.\n"
+        f"{arr} **Staff decisions are final.**\n\n"
+        f"{boost} Happy with your order? Drop a {star} **vouch** with `/vouch` {check}")
+    e = discord.Embed(title=f"{tick}  Simple Boosts — Rules", colour=ACCENT, description=desc)
+    e.set_footer(text="Simple Boosts · Your #1 leading boost provider")
+    if BANNER_FILE.exists():
+        e.set_image(url="attachment://banner.gif")
+        await ch.send(embed=e, file=discord.File(BANNER_FILE, filename="banner.gif"))
+    else:
+        await ch.send(embed=e)
+    await i.followup.send(f"{check} Rules posted in {ch.mention}.", ephemeral=True)
 
 
 # ===================================================================== HELP
