@@ -1294,6 +1294,60 @@ async def payment_loop():
         await asyncio.sleep(30)
 
 
+def order_embed(o):
+    coin = (o.get("pay_currency") or "").upper()
+    cem = em(f"sb_{coin.lower()}") if coin in ("USDT", "BTC", "LTC") else ""
+    total = (o.get("total_cents") or 0) / 100
+    disc = (o.get("discount_cents") or 0) / 100
+    cred = (o.get("credit_used_cents") or 0) / 100
+    status = (o.get("status") or "awaiting_payment").replace("_", " ").title()
+    qty = o.get("quantity", 1) or 1
+    e = discord.Embed(
+        title=f"{em('sb_ticket', '🧾')}  New order #{o.get('order_number', '?')}",
+        colour=ACCENT, timestamp=now())
+    e.add_field(name="Product",
+                value=o.get("product_name", "—") + (f"  ×{qty}" if qty > 1 else ""), inline=True)
+    e.add_field(name="Paid", value=f"**${total:.2f}**" + (f"  {cem} {coin}".rstrip() if coin else ""), inline=True)
+    e.add_field(name="Status", value=status, inline=True)
+    e.add_field(name="Customer", value=o.get("username") or "—", inline=True)
+    e.add_field(name="Email", value=o.get("email") or "—", inline=True)
+    if o.get("discount_code"):
+        e.add_field(name="Discount", value=f"{o['discount_code']} (−${disc:.2f})", inline=True)
+    if o.get("server_link"):
+        e.add_field(name="Server / target", value=str(o["server_link"])[:200], inline=False)
+    e.set_footer(text=(f"Paid ${cred:.2f} with credit • Simple Boosts" if cred > 0
+                       else "Simple Boosts • Website order"))
+    return e
+
+
+async def orders_loop():
+    """Poll the website database for new orders and post them to the #orders channel."""
+    await bot.wait_until_ready()
+    while not bot.is_closed():
+        try:
+            if SB_BOT_SECRET:
+                data, err = await sb_rpc("bot_pending_orders", {})
+                if isinstance(data, list) and data:
+                    done = []
+                    for o in data:
+                        posted = False
+                        for g in bot.guilds:
+                            ch = log_channel(g, "orders_channel")
+                            if ch:
+                                try:
+                                    await ch.send(embed=order_embed(o))
+                                    posted = True
+                                except Exception as ex:
+                                    print("order post:", ex)
+                        if posted and o.get("id"):
+                            done.append(o["id"])
+                    if done:
+                        await sb_rpc("bot_mark_notified", {"p_ids": done})
+        except Exception as ex:
+            print("orders loop:", ex)
+        await asyncio.sleep(20)
+
+
 # ==================================================================== TICKETS
 TICKET_CAT = "🎫 Tickets"
 TRANSCRIPT_NAME = "📑┃transcripts"
@@ -2460,6 +2514,7 @@ async def setup_hook():
     bot.add_view(InvoicePanelView())
     bot.loop.create_task(giveaway_loop())
     bot.loop.create_task(payment_loop())
+    bot.loop.create_task(orders_loop())
 
 
 _synced = False
