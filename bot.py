@@ -58,6 +58,15 @@ PAY_METHODS = [
     ("BTC",  "sb_btc",  "$1"),
     ("LTC",  "sb_ltc",  None),
 ]
+
+# ---- Website database (Supabase) ----
+# URL + anon key are public/safe. The bot SECRET is private: set SB_BOT_SECRET
+# in your host's environment variables (NOT in this file / the repo).
+SB_URL = os.getenv("SUPABASE_URL", "https://ynrqhvtkbwoykwhqzzyn.supabase.co").rstrip("/")
+SB_ANON = os.getenv("SUPABASE_ANON", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InlucnFodnRrYndveWt3aHF6enluIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTQyMjM4NTcsImV4cCI6MjEwOTc5OTg1N30.eyUR3sYLjLzbcklmDNJfp_BAZQnMZncFg33S2EbsLNE")
+SB_BOT_SECRET = os.getenv("SB_BOT_SECRET", "").strip()
+# Optional channel (by name) to post a public "swap completed" feed message in
+SWAPS_CHANNEL_NAME = os.getenv("SWAPS_CHANNEL", "swaps").strip()
 PAY_FEE = {name: fee for name, _e, fee in PAY_METHODS}
 
 # Custom emojis the bot uploads to the server (files live in ./emojis/<name>.png)
@@ -1005,6 +1014,31 @@ async def _http():
     if _session is None or _session.closed:
         _session = aiohttp.ClientSession(headers={"User-Agent": "SimpleBoostsBot/1.0"})
     return _session
+
+
+async def sb_rpc(name, payload):
+    """Call a Supabase RPC on the website database using the bot secret.
+    Returns (data, error_string). error_string is None on success."""
+    if not SB_BOT_SECRET:
+        return None, "SB_BOT_SECRET isn't set on the bot host."
+    s = await _http()
+    body = dict(payload)
+    body["p_secret"] = SB_BOT_SECRET
+    try:
+        async with s.post(
+            f"{SB_URL}/rest/v1/rpc/{name}",
+            headers={"apikey": SB_ANON, "Authorization": f"Bearer {SB_ANON}",
+                     "Content-Type": "application/json"},
+            json=body, timeout=aiohttp.ClientTimeout(total=20)) as r:
+            txt = await r.text()
+            if r.status >= 400:
+                return None, f"HTTP {r.status}: {txt[:180]}"
+            try:
+                return (json.loads(txt) if txt.strip() else {}), None
+            except Exception:
+                return {}, None
+    except Exception as e:
+        return None, str(e)
 
 
 async def coin_usd(coin):
@@ -2122,6 +2156,54 @@ def prices_embed():
 def prices_file():
     logo = BASE / "emojis" / "sb_boost.png"
     return discord.File(logo, filename="logo.png") if logo.exists() else None
+
+
+@bot.tree.command(name="swap", description="💱 Log a completed crypto swap (shows live on the website)")
+@is_admin()
+@app_commands.describe(
+    sent="Coin the customer SENT you (e.g. BTC)",
+    received="Coin you sent BACK to them (e.g. LTC)",
+    usd_value="USD value of the swap (for the all-time total)",
+    sent_amount="How much they sent (optional)",
+    received_amount="How much they got back (optional)",
+    customer="The customer (optional)")
+async def swap_cmd(i: discord.Interaction, sent: str, received: str, usd_value: float,
+                   sent_amount: float = None, received_amount: float = None,
+                   customer: discord.Member = None):
+    await i.response.defer(ephemeral=True)
+    if usd_value < 0:
+        await i.followup.send("❌ USD value can't be negative.", ephemeral=True)
+        return
+    data, err = await sb_rpc("bot_log_swap", {
+        "p_from": sent.upper().strip(),
+        "p_to": received.upper().strip(),
+        "p_from_amount": sent_amount,
+        "p_to_amount": received_amount,
+        "p_usd": round(float(usd_value), 2),
+        "p_username": (customer.display_name if customer else i.user.display_name),
+        "p_discord_id": str(customer.id) if customer else None,
+    })
+    if err:
+        await i.followup.send(f"❌ Couldn't log the swap: {err}", ephemeral=True)
+        return
+    sa = f"{sent_amount:g} " if sent_amount else ""
+    ra = f"{received_amount:g} " if received_amount else ""
+    e = discord.Embed(title="💱 Swap logged",
+                      description=f"**{sa}{sent.upper()} → {ra}{received.upper()}**\n"
+                                  f"Value: **${usd_value:,.2f}**\n\nAdded to the website totals ✅",
+                      colour=ACCENT, timestamp=now())
+    if customer:
+        e.add_field(name="Customer", value=customer.mention, inline=True)
+    await i.followup.send(embed=e, ephemeral=True)
+    # Optional: post a public note in a #swaps channel if one exists
+    try:
+        ch = next((c for c in i.guild.text_channels if c.name.endswith(SWAPS_CHANNEL_NAME)), None)
+        if ch and ch.id != i.channel_id:
+            pe = discord.Embed(description=f"💱 **{sa}{sent.upper()} → {ra}{received.upper()}** · ${usd_value:,.2f}",
+                               colour=ACCENT, timestamp=now())
+            await ch.send(embed=pe)
+    except Exception:
+        pass
 
 
 @bot.tree.command(name="prices", description="🏷️ Boost price list")
