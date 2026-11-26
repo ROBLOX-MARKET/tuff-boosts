@@ -1587,7 +1587,7 @@ async def close_ticket(channel, closer):
         pass
 
 
-async def open_ticket(i, kind, pay=None, invoice=None):
+async def open_ticket(i, kind, pay=None, invoice=None, swap=None):
     guild = i.guild
     if guild is None:
         return await i.response.send_message("Use this in a server.", ephemeral=True)
@@ -1606,7 +1606,7 @@ async def open_ticket(i, kind, pay=None, invoice=None):
             cat = await guild.create_category(TICKET_CAT)
         except Exception:
             cat = None
-    label = {"buy": "boosts", "support": "support"}.get(kind, "ticket")
+    label = {"buy": "boosts", "support": "support", "swap": "swap"}.get(kind, "ticket")
     counters = store.config.setdefault("ticket_counters", {})
     num = counters.get(kind, 0) + 1
     chname = f"{label}-{num:04d}"   # e.g. boosts-0001 / support-0001
@@ -1618,7 +1618,7 @@ async def open_ticket(i, kind, pay=None, invoice=None):
             "❌ I need the **Manage Channels** permission (give me Administrator).", ephemeral=True)
     counters[kind] = num   # only bump the counter once the channel actually exists
     store.tickets[str(ch.id)] = {"opener": i.user.id, "kind": kind, "pay": pay,
-                                 "invoice": invoice, "at": now().isoformat(), "closed": False}
+                                 "invoice": invoice, "swap": swap, "at": now().isoformat(), "closed": False}
     store.save()
     role = guild.get_role(ticket_role_id(guild))
     ping = role.mention if role else ""
@@ -1639,6 +1639,19 @@ async def open_ticket(i, kind, pay=None, invoice=None):
                     value="💳 Ready to pay? Tap **Pay Now** below — totally optional, pay whenever you're ready.",
                     inline=False)
         view = BuyTicketView()
+    elif kind == "swap":
+        sw = swap or {}
+        e = discord.Embed(
+            title=f"{em('sb_arrow', '💱')}  Crypto Swap",
+            colour=ACCENT,
+            description=("Thanks for your swap request! A staff member will confirm your "
+                        "rate and send you the deposit address shortly.\n\n"
+                        "Once you send your coin, we'll send the swapped crypto straight to "
+                        "your wallet — fast and secure."))
+        e.add_field(name=f"{em('sb_arrow','📤')} Sending", value=sw.get("send", "—"), inline=True)
+        e.add_field(name=f"{em('sb_check','📥')} Receiving", value=sw.get("receive", "—"), inline=True)
+        e.add_field(name="💼 Payout address", value=f"`{sw.get('address', '—')}`", inline=False)
+        view = TicketCloseView()
     else:
         e = discord.Embed(
             title="💬  Support",
@@ -1806,6 +1819,55 @@ class BuyTicketClaimedView(discord.ui.View):
                        style=discord.ButtonStyle.danger, custom_id="tkt:close2")
     async def close(self, i, b):
         await _ticket_close(i)
+
+
+class SwapModal(discord.ui.Modal, title="💱 Start a crypto swap"):
+    sending = discord.ui.TextInput(
+        label="You're sending", placeholder="e.g. 0.01 BTC  (amount + coin)",
+        max_length=40, required=True)
+    receiving = discord.ui.TextInput(
+        label="You want to receive", placeholder="e.g. LTC",
+        max_length=40, required=True)
+    address = discord.ui.TextInput(
+        label="Your payout address", placeholder="where we send your swapped coin",
+        max_length=120, required=True)
+
+    async def on_submit(self, i: discord.Interaction):
+        await open_ticket(i, "swap", swap={
+            "send": str(self.sending.value).strip(),
+            "receive": str(self.receiving.value).strip(),
+            "address": str(self.address.value).strip(),
+        })
+
+
+class SwapPanelView(discord.ui.View):
+    """Public swaps panel: a Start a Swap button that opens a swap ticket."""
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Start a Swap", emoji="💱",
+                       style=discord.ButtonStyle.success, custom_id="swap:start")
+    async def start(self, i: discord.Interaction, b: discord.ui.Button):
+        await i.response.send_modal(SwapModal())
+
+
+def swap_panel_embed():
+    e = discord.Embed(
+        title=f"{em('sb_arrow', '💱')}  Crypto Swaps",
+        colour=ACCENT,
+        description=(
+            "Swap your crypto fast, safe and at fair rates — handled personally by our team.\n\n"
+            f"{em('sb_check','✅')} **Non-custodial & trusted**\n"
+            f"{em('sb_check','✅')} **Great rates, low fees**\n"
+            f"{em('sb_check','✅')} **Done in minutes**\n\n"
+            "Tap **Start a Swap** below, tell us what you have and what you want, and we'll "
+            "lock in your rate and send the deposit address."))
+    e.add_field(
+        name="Coins we swap",
+        value=f"{em('sb_btc','🟠')} BTC   {em('sb_ltc','⚪')} LTC   {em('sb_usdt','🟢')} USDT   ＋ more — just ask",
+        inline=False)
+    e.set_footer(text="Simple Boosts • Crypto Swaps")
+    return e
 
 
 class SetOrderModal(discord.ui.Modal, title="Set order total"):
@@ -2158,6 +2220,17 @@ def prices_file():
     return discord.File(logo, filename="logo.png") if logo.exists() else None
 
 
+@bot.tree.command(name="swappanel", description="💱 Post the crypto swaps panel in this channel")
+@is_admin()
+@app_commands.describe(channel="Where to post (default: here)")
+async def swappanel_cmd(i: discord.Interaction, channel: discord.TextChannel = None):
+    await i.response.defer(ephemeral=True)
+    await ensure_emojis(i.guild)
+    ch = channel or i.channel
+    await ch.send(embed=swap_panel_embed(), view=SwapPanelView())
+    await i.followup.send(f"{em('sb_check','✅')} Swaps panel posted in {ch.mention}.", ephemeral=True)
+
+
 @bot.tree.command(name="swap", description="💱 Log a completed crypto swap (shows live on the website)")
 @is_admin()
 @app_commands.describe(
@@ -2382,6 +2455,7 @@ async def setup_hook():
     bot.add_view(TicketPanelView())
     bot.add_view(TicketCloseView())
     bot.add_view(BuyTicketView())
+    bot.add_view(SwapPanelView())
     bot.add_view(PaymentPanelView())
     bot.add_view(InvoicePanelView())
     bot.loop.create_task(giveaway_loop())
