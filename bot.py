@@ -1332,7 +1332,20 @@ async def orders_loop():
                     for o in data:
                         posted = False
                         for g in bot.guilds:
-                            ch = log_channel(g, "orders_channel")
+                            ch = discord.utils.find(lambda c: "order" in c.name.lower(), g.text_channels)
+                            if ch is None:
+                                # make a staff-only #orders channel so customer emails aren't public
+                                try:
+                                    role = g.get_role(ticket_role_id(g))
+                                    ow = {g.default_role: discord.PermissionOverwrite(view_channel=False),
+                                          g.me: discord.PermissionOverwrite(view_channel=True, send_messages=True)}
+                                    if role:
+                                        ow[role] = discord.PermissionOverwrite(view_channel=True, send_messages=False)
+                                    ch = await g.create_text_channel("orders", overwrites=ow,
+                                                                     topic="Website orders")
+                                    print("orders: created #orders channel")
+                                except Exception as ex:
+                                    print("orders channel create:", ex)
                             if ch:
                                 try:
                                     await ch.send(embed=order_embed(o))
